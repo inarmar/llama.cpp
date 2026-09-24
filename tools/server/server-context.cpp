@@ -5527,7 +5527,15 @@ std::unique_ptr<server_res_generator> server_routes::handle_count_tokens(const l
 
     // TODO @ngxson : refactor this code block, move this to server-common and reuse it in other places
     size_t n_tokens;
-    if (mctx != nullptr) {
+    if (body_parsed.contains("prompt_parts")) {
+        if (mctx != nullptr) {
+            n_tokens = process_mtmd_prompt_parts(mctx, body_parsed.at("prompt_parts"), files, init_opt).size();
+        } else if (files.empty()) {
+            n_tokens = tokenize_prompt_parts(vocab, body_parsed.at("prompt_parts"), true).size();
+        } else {
+            throw std::runtime_error("Multimodal prompt parts require a multimodal model");
+        }
+    } else if (mctx != nullptr) {
         if (!prompt.is_string()) {
             throw std::runtime_error("for mtmd, input prompt must be a string.");
         }

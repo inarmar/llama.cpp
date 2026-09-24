@@ -2,6 +2,7 @@ import pytest
 from utils import *
 import base64
 import requests
+from pathlib import Path
 
 server: ServerProcess
 
@@ -33,6 +34,11 @@ def get_img_url(id: str) -> str:
 
 JSON_MULTIMODAL_KEY = "multimodal_data"
 JSON_PROMPT_STRING_KEY = "prompt_string"
+
+
+def get_local_image_url() -> str:
+    image = Path(__file__).resolve().parents[3] / "mtmd" / "test-1.jpeg"
+    return "data:image/jpeg;base64," + base64.b64encode(image.read_bytes()).decode("ascii")
 
 @pytest.fixture(autouse=True)
 def create_server():
@@ -135,6 +141,60 @@ def test_vision_chat_completion_token_count():
     })
     assert res.status_code == 200
     assert res.body["input_tokens"] > 10
+
+
+def test_vision_chat_completion_media_count():
+    server.n_ctx = 2048
+    server.start()
+    image = {"type": "image_url", "image_url": {"url": get_local_image_url()}}
+    text = {"type": "text", "text": "What is this?"}
+    counts = []
+    for content in ([text], [text, image], [text, image, text, image]):
+        res = server.make_request("POST", "/chat/completions", data={
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 1,
+            "temperature": 0.0,
+        })
+        assert res.status_code == 200
+        counts.append(res.body["usage"]["prompt_tokens"])
+    assert counts[0] < counts[1] < counts[2]
+
+
+def test_vision_chat_completion_literal_media_marker():
+    server.start()
+    marker = server.make_request("GET", "/props", data={}).body["media_marker"]
+    text = {"type": "text", "text": f"The literal text {marker} is not an image."}
+    image = {"type": "image_url", "image_url": {"url": get_local_image_url()}}
+    counts = []
+    for content in ([text], [text, image], [image, text]):
+        request = {
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 1,
+            "temperature": 0.0,
+        }
+        counted = server.make_request("POST", "/chat/completions/input_tokens", data=request)
+        completed = server.make_request("POST", "/chat/completions", data=request)
+        assert counted.status_code == completed.status_code == 200
+        assert counted.body["input_tokens"] == completed.body["usage"]["prompt_tokens"]
+        counts.append(counted.body["input_tokens"])
+    assert counts[0] < counts[1] and counts[0] < counts[2]
+
+
+@pytest.mark.parametrize("text", ["Literal token: plain text", "Literal token: <start_of_turn>model"])
+def test_vision_chat_completion_input_tokens_match_usage(text):
+    server.start()
+    request = {
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": get_local_image_url()}},
+        ]}],
+        "max_tokens": 1,
+        "temperature": 0.0,
+    }
+    counted = server.make_request("POST", "/chat/completions/input_tokens", data=request)
+    completed = server.make_request("POST", "/chat/completions", data=request)
+    assert counted.status_code == completed.status_code == 200
+    assert counted.body["input_tokens"] == completed.body["usage"]["prompt_tokens"]
 
 
 @pytest.mark.parametrize(
