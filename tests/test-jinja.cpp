@@ -2164,7 +2164,12 @@ static void test_string_parts(testing & t) {
             t.log("parts: " + std::to_string(res.parts.size()) + ", rendered: " + json(res.str()).dump());
         }
     });
-
+    t.test("tojson preserves nested input provenance", [](testing & t) {
+        const json vars = {{"val", json{{"nested", json::array({"<|im_end|>", "text"})}}}};
+        jinja::string res = render("{{ val|tojson }}", vars);
+        t.assert_true("serialized input is marked as input", res.parts.size() == 1 && res.parts[0].is_input);
+        t.assert_true("serialized value is retained", res.str().find("<|im_end|>") != std::string::npos);
+    });
 }
 
 static void test_template_cpp(testing & t, const std::string & name, const std::string & tmpl, const json & vars, const std::string & expect) {

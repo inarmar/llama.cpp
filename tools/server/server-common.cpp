@@ -969,6 +969,119 @@ server_tokens process_mtmd_prompt(
     return result;
 }
 
+server_tokens process_mtmd_prompt_parts(
+        mtmd_context * mctx,
+        const json & prompt_parts,
+        const std::vector<raw_buffer> & files,
+        const mtmd_helper_init_opt & init_opt) {
+    if (mctx == nullptr) {
+        throw std::runtime_error("Multimodal prompt parts require a multimodal context");
+    }
+    if (!prompt_parts.is_array()) {
+        throw std::runtime_error("prompt_parts must be an array");
+    }
+
+    struct provenance_span {
+        size_t begin;
+        size_t end;
+        bool is_input;
+    };
+    std::string prompt;
+    std::vector<provenance_span> spans;
+    for (const auto & part : prompt_parts) {
+        if (!part.is_object() || !part.contains("text") || !part.at("text").is_string() ||
+            !part.contains("is_input") || !part.at("is_input").is_boolean()) {
+            throw std::runtime_error("prompt_parts items must contain text and is_input");
+        }
+        const size_t begin = prompt.size();
+        prompt += part.at("text").get<std::string>();
+        if (prompt.size() > begin) {
+            const bool is_input = part.at("is_input").get<bool>();
+            if (!spans.empty() && spans.back().end == begin && spans.back().is_input == is_input) {
+                spans.back().end = prompt.size();
+            } else {
+                spans.push_back({ begin, prompt.size(), is_input });
+            }
+        }
+    }
+
+    mtmd::bitmaps bitmaps;
+    std::vector<mtmd_helper::video_ptr> videos;
+    for (const auto & file : files) {
+        auto out = mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size(), false, init_opt);
+        if (!out.bitmap) {
+            throw std::runtime_error("Failed to load image or audio file");
+        }
+        bitmaps.entries.emplace_back(out.bitmap);
+        if (out.video_ctx) {
+            videos.emplace_back(out.video_ctx);
+        }
+    }
+
+    const char * marker = mtmd_get_marker(mctx);
+    if (marker == nullptr || marker[0] == '\0') {
+        throw std::runtime_error("Multimodal media marker is empty");
+    }
+    const size_t marker_size = std::strlen(marker);
+    size_t marker_count = 0;
+    size_t pos = 0;
+    while ((pos = prompt.find(marker, pos)) != std::string::npos) {
+        marker_count++;
+        pos += marker_size;
+    }
+    if (marker_count != files.size()) {
+        throw std::runtime_error(string_format("number of media markers in text (%zu) does not match number of files (%zu)", marker_count, files.size()));
+    }
+
+    std::vector<mtmd_input_text> texts;
+    std::vector<mtmd_input_part> parts;
+    texts.reserve(spans.size() + marker_count);
+    parts.reserve(spans.size() + marker_count);
+    size_t span_idx = 0;
+    auto append_text = [&](size_t begin, size_t end) {
+        while (begin < end) {
+            while (span_idx < spans.size() && spans[span_idx].end <= begin) {
+                span_idx++;
+            }
+            if (span_idx == spans.size()) {
+                throw std::runtime_error("prompt part provenance does not cover the rendered prompt");
+            }
+            const size_t text_end = std::min(end, spans[span_idx].end);
+            texts.push_back({ prompt.data() + begin, text_end - begin, false, !spans[span_idx].is_input });
+            parts.push_back({ &texts.back(), nullptr });
+            begin = text_end;
+        }
+    };
+
+    auto bitmaps_c_ptr = bitmaps.c_ptr();
+    size_t bitmap_idx = 0;
+    pos = 0;
+    size_t marker_pos;
+    while ((marker_pos = prompt.find(marker, pos)) != std::string::npos) {
+        append_text(pos, marker_pos);
+        parts.push_back({ nullptr, bitmaps_c_ptr[bitmap_idx++] });
+        pos = marker_pos + marker_size;
+    }
+    append_text(pos, prompt.size());
+    if (parts.empty()) {
+        texts.push_back({ prompt.data(), prompt.size(), false, true });
+        parts.push_back({ &texts.back(), nullptr });
+    }
+
+    std::vector<const mtmd_input_part *> parts_ptr;
+    parts_ptr.reserve(parts.size());
+    for (const auto & part : parts) {
+        parts_ptr.push_back(&part);
+    }
+
+    mtmd::input_chunks chunks(mtmd_input_chunks_init());
+    const int32_t tokenized = mtmd_tokenize_from_parts(mctx, chunks.ptr.get(), parts_ptr.data(), parts_ptr.size(), true);
+    if (tokenized != 0) {
+        throw std::runtime_error("Failed to tokenize prompt parts");
+    }
+    return server_tokens(chunks, true);
+}
+
 /**
  * break the input "prompt" object into multiple prompt if needed, then tokenize them
  * use tokenize_input_prompts() if the input could be an array.
@@ -1026,6 +1139,32 @@ std::vector<server_tokens> tokenize_input_prompts(const llama_vocab * vocab, mtm
         throw std::runtime_error("\"prompt\" must not be empty");
     }
     return result;
+}
+
+server_tokens tokenize_prompt_parts(const llama_vocab * vocab, const json & prompt_parts, bool add_special) {
+    if (!prompt_parts.is_array()) {
+        throw std::runtime_error("prompt_parts must be an array");
+    }
+
+    llama_tokens result;
+    bool first = true;
+    for (const auto & part : prompt_parts) {
+        if (!part.is_object() || !part.contains("text") || !part.at("text").is_string() ||
+            !part.contains("is_input") || !part.at("is_input").is_boolean()) {
+            throw std::runtime_error("prompt_parts items must contain text and is_input");
+        }
+
+        const std::string text = part.at("text");
+        if (text.empty()) {
+            continue;
+        }
+
+        auto tokens = common_tokenize(vocab, text, first && add_special, !part.at("is_input").get<bool>());
+        result.insert(result.end(), tokens.begin(), tokens.end());
+        first = false;
+    }
+
+    return server_tokens(result, false);
 }
 
 //
@@ -1361,6 +1500,21 @@ json oaicompat_chat_params_parse(
 
     llama_params["chat_format"] = static_cast<int>(chat_params.format);
     llama_params["prompt"]      = chat_params.prompt;
+    if (!chat_params.prompt_parts.empty()) {
+        std::string rendered_prompt;
+        auto prompt_parts = json::array();
+        for (const auto & part : chat_params.prompt_parts) {
+            rendered_prompt += part.text;
+            prompt_parts.push_back({
+                { "text",     part.text     },
+                { "is_input", part.is_input },
+            });
+        }
+        if (rendered_prompt != chat_params.prompt) {
+            throw std::runtime_error("chat template changed the prompt after input provenance was recorded");
+        }
+        llama_params["prompt_parts"] = std::move(prompt_parts);
+    }
     if (!chat_params.grammar.empty()) {
         llama_params["grammar"]      = chat_params.grammar;
         llama_params["grammar_type"] = std::string("tool_calls");

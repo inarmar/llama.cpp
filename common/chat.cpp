@@ -902,12 +902,20 @@ common_reasoning_format common_reasoning_format_from_name(const std::string & fo
     throw std::runtime_error("Unknown reasoning format: " + format);
 }
 
+void common_chat_params_append_prompt(common_chat_params & params, const std::string & text, bool is_input) {
+    params.prompt += text;
+    if (!text.empty()) {
+        params.prompt_parts.push_back({ text, is_input });
+    }
+}
+
 std::string common_chat_template_direct_apply_impl(
     const common_chat_template & tmpl,
     const autoparser::generation_params & inputs,
     const std::optional<json> & messages_override,
     const std::optional<json> & tools_override,
-    const std::optional<json> & additional_context) {
+    const std::optional<json> & additional_context,
+    std::vector<common_chat_rendered_part> * output_parts) {
     jinja::context ctx(tmpl.source());
 
     // messages_override is already built for this template, do not touch its content parts
@@ -915,8 +923,6 @@ std::string common_chat_template_direct_apply_impl(
         {"messages", messages_override.has_value()
             ? *messages_override
             : messages_inp_normalizer(tmpl.original_caps()).normalize(inputs.messages)},
-        {"bos_token", tmpl.bos_token()},
-        {"eos_token", tmpl.eos_token()},
         {"enable_thinking", inputs.enable_thinking},
     };
     if (tools_override.has_value() || !inputs.tools.empty()) {
@@ -947,28 +953,80 @@ std::string common_chat_template_direct_apply_impl(
     }
 
     jinja::global_from_json(ctx, inp, inputs.mark_input);
+    jinja::global_from_json(ctx, json{
+        { "bos_token", tmpl.bos_token() },
+        { "eos_token", tmpl.eos_token() },
+    }, false);
 
     // render
     jinja::runtime runtime(ctx);
     const jinja::value results = runtime.execute(tmpl.prog);
     auto parts = jinja::runtime::gather_string_parts(results);
 
-    std::string result = parts->as_string().str();
+    std::vector<common_chat_rendered_part> rendered_parts;
+    rendered_parts.reserve(parts->as_string().parts.size());
+    for (const auto & part : parts->as_string().parts) {
+        if (!part.val.empty()) {
+            rendered_parts.push_back({ part.val, part.is_input });
+        }
+    }
+
+    auto render = [&rendered_parts]() {
+        std::string result;
+        for (const auto & part : rendered_parts) {
+            result += part.text;
+        }
+        return result;
+    };
+
+    auto erase_prefix = [&rendered_parts](size_t length) {
+        while (length > 0 && !rendered_parts.empty()) {
+            auto & text = rendered_parts.front().text;
+            if (text.size() <= length) {
+                length -= text.size();
+                rendered_parts.erase(rendered_parts.begin());
+            } else {
+                text.erase(0, length);
+                length = 0;
+            }
+        }
+    };
+
+    auto erase_suffix = [&rendered_parts](size_t length) {
+        while (length > 0 && !rendered_parts.empty()) {
+            auto & text = rendered_parts.back().text;
+            if (text.size() <= length) {
+                length -= text.size();
+                rendered_parts.pop_back();
+            } else {
+                text.resize(text.size() - length);
+                length = 0;
+            }
+        }
+    };
+
+    std::string result = render();
 
     // TODO: improve this later
     if (inputs.add_bos && string_starts_with(result, tmpl.bos_token())) {
-        result = result.substr(tmpl.bos_token().size());
+        erase_prefix(tmpl.bos_token().size());
+        result = render();
     }
     if (inputs.add_eos && string_ends_with(result, tmpl.eos_token())) {
-        result = result.substr(0, result.size() - tmpl.eos_token().size());
+        erase_suffix(tmpl.eos_token().size());
+        result = render();
+    }
+    if (output_parts != nullptr) {
+        *output_parts = std::move(rendered_parts);
     }
     return result;
 }
 
 std::string common_chat_template_direct_apply(
     const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs) {
-    return common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt);
+    const autoparser::generation_params & inputs,
+    std::vector<common_chat_rendered_part> * output_parts) {
+    return common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt, output_parts);
 }
 
 std::string common_chat_template_generation_prompt_impl(
@@ -1308,7 +1366,7 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
         common_chat_params data;
         auto params_copy               = params;
         params_copy.reasoning_format   = COMMON_REASONING_FORMAT_NONE;
-        data.prompt                    = common_chat_template_direct_apply_impl(tmpl, params_copy);
+        data.prompt                    = common_chat_template_direct_apply_impl(tmpl, params_copy, std::nullopt, std::nullopt, std::nullopt, &data.prompt_parts);
         data.generation_prompt         = common_chat_template_generation_prompt_impl(tmpl, params);
         data.format                    = COMMON_CHAT_FORMAT_PEG_NATIVE;
         auto parser                    = build_chat_peg_parser([&data](common_chat_peg_builder &p) {

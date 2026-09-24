@@ -6,7 +6,7 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
 
     const std::string GEN_PREFIX = "<|im_start|>assistant\n";
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt, &data.prompt_parts);
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
 
@@ -45,17 +45,20 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
         const auto & msg = inputs.continue_msg;
 
         data.generation_prompt = GEN_PREFIX;
+        common_chat_params_append_prompt(data, GEN_PREFIX, false);
         if (supports_reasoning) {
             data.generation_prompt += "<think>\n" + msg.reasoning_content;
+            common_chat_params_append_prompt(data, "<think>\n", false);
+            common_chat_params_append_prompt(data, msg.reasoning_content, true);
             if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
                 data.generation_prompt += "\n</think>\n\n";
+                common_chat_params_append_prompt(data, "\n</think>\n\n", false);
             }
         }
         if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
             data.generation_prompt += msg.render_content();
+            common_chat_params_append_prompt(data, msg.render_content(), true);
         }
-
-        data.prompt += data.generation_prompt;
     }
 
     std::vector<std::string> tool_call_starts = { "<tool_call>" };

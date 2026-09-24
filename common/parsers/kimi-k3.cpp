@@ -9,7 +9,7 @@ common_chat_params common_chat_params_init_kimi_k3(const common_chat_template & 
                                                           const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt, &data.prompt_parts);
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
@@ -59,11 +59,13 @@ common_chat_params common_chat_params_init_kimi_k3(const common_chat_template & 
         const auto & msg = inputs.continue_msg;
 
         data.generation_prompt = MSG_START + THINK_START + msg.reasoning_content;
+        common_chat_params_append_prompt(data, MSG_START + THINK_START, false);
+        common_chat_params_append_prompt(data, msg.reasoning_content, true);
         if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
             data.generation_prompt += THINK_END + RESP_START + msg.render_content();
+            common_chat_params_append_prompt(data, THINK_END + RESP_START, false);
+            common_chat_params_append_prompt(data, msg.render_content(), true);
         }
-
-        data.prompt += data.generation_prompt;
     }
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {

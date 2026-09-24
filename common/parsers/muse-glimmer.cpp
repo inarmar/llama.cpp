@@ -11,7 +11,7 @@ common_chat_params common_chat_params_init_muse_glimmer(const common_chat_templa
                                                                const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt, &data.prompt_parts);
     data.generation_prompt = "<|start|>assistant";
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
@@ -34,11 +34,13 @@ common_chat_params common_chat_params_init_muse_glimmer(const common_chat_templa
         const auto & msg = inputs.continue_msg;
 
         data.generation_prompt = "<|start|>assistant to=self<|message|>" + msg.reasoning_content;
+        common_chat_params_append_prompt(data, "<|start|>assistant to=self<|message|>", false);
+        common_chat_params_append_prompt(data, msg.reasoning_content, true);
         if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
             data.generation_prompt += "<|eom|><|start|>assistant to=user<|message|>" + msg.render_content();
+            common_chat_params_append_prompt(data, "<|eom|><|start|>assistant to=user<|message|>", false);
+            common_chat_params_append_prompt(data, msg.render_content(), true);
         }
-
-        data.prompt += data.generation_prompt;
     }
 
     auto extract_reasoning = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;

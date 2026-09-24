@@ -33,7 +33,7 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &  
                                                   const autoparser &              autoparser) {
     // Create the result structure
     common_chat_params data;
-    data.prompt            = common_chat_template_direct_apply(tmpl, inputs);
+    data.prompt            = common_chat_template_direct_apply(tmpl, inputs, &data.prompt_parts);
     data.generation_prompt = common_chat_template_generation_prompt(tmpl, inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.preserved_tokens  = autoparser.preserved_tokens;
@@ -47,18 +47,24 @@ common_chat_params peg_generator::generate_parser(const common_chat_template &  
         const auto & msg = inputs.continue_msg;
 
         if (!autoparser.reasoning.start.empty()) {
-            data.generation_prompt = data.generation_prompt.substr(0, data.generation_prompt.find(autoparser.reasoning.start));
-            data.generation_prompt += autoparser.reasoning.start + msg.reasoning_content;
+            const size_t reasoning_pos = data.generation_prompt.find(autoparser.reasoning.start);
+            const std::string prefix = data.generation_prompt.substr(0, reasoning_pos);
+            data.generation_prompt = prefix + autoparser.reasoning.start + msg.reasoning_content;
+            common_chat_params_append_prompt(data, prefix, false);
+            common_chat_params_append_prompt(data, autoparser.reasoning.start, false);
+            common_chat_params_append_prompt(data, msg.reasoning_content, true);
             if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
                 data.generation_prompt += autoparser.reasoning.end;
+                common_chat_params_append_prompt(data, autoparser.reasoning.end, false);
             }
+        } else {
+            common_chat_params_append_prompt(data, data.generation_prompt, false);
         }
 
         if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
             data.generation_prompt += msg.render_content();
+            common_chat_params_append_prompt(data, msg.render_content(), true);
         }
-
-        data.prompt += data.generation_prompt;
     }
 
     auto parser = autoparser.build_parser(inputs, parser_generation_prompt);

@@ -7,7 +7,7 @@ common_chat_params common_chat_params_init_minicpm5(const common_chat_template &
                                                            const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt, &data.prompt_parts);
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
@@ -39,11 +39,13 @@ common_chat_params common_chat_params_init_minicpm5(const common_chat_template &
         const auto & msg = inputs.continue_msg;
 
         data.generation_prompt = "<|im_start|>assistant\n<think>\n" + msg.reasoning_content;
+        common_chat_params_append_prompt(data, "<|im_start|>assistant\n<think>\n", false);
+        common_chat_params_append_prompt(data, msg.reasoning_content, true);
         if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
             data.generation_prompt += "\n</think>\n\n" + msg.render_content();
+            common_chat_params_append_prompt(data, "\n</think>\n\n", false);
+            common_chat_params_append_prompt(data, msg.render_content(), true);
         }
-
-        data.prompt += data.generation_prompt;
     }
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {

@@ -33,7 +33,7 @@ common_chat_params common_chat_params_init_lfm2(const common_chat_template &    
         adjusted_messages.push_back(msg);
     }
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, adjusted_messages);
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, adjusted_messages, std::nullopt, std::nullopt, &data.prompt_parts);
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs, adjusted_messages);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
@@ -57,11 +57,13 @@ common_chat_params common_chat_params_init_lfm2(const common_chat_template &    
         const auto & msg = inputs.continue_msg;
 
         data.generation_prompt = GEN_PROMPT + THINK_START + msg.reasoning_content;
+        common_chat_params_append_prompt(data, GEN_PROMPT + THINK_START, false);
+        common_chat_params_append_prompt(data, msg.reasoning_content, true);
         if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
             data.generation_prompt += THINK_END + msg.render_content();
+            common_chat_params_append_prompt(data, THINK_END, false);
+            common_chat_params_append_prompt(data, msg.render_content(), true);
         }
-
-        data.prompt += data.generation_prompt;
     }
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {

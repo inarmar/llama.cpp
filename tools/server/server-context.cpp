@@ -4291,7 +4291,15 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         // process prompt
         std::vector<server_tokens> inputs;
 
-        if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
+        if (res_type != TASK_RESPONSE_TYPE_NONE && data.contains("prompt_parts")) {
+            if (ctx_server.mctx != nullptr) {
+                inputs.push_back(process_mtmd_prompt_parts(ctx_server.mctx, data.at("prompt_parts"), files, ctx_server.init_opt));
+            } else if (files.empty()) {
+                inputs.push_back(tokenize_prompt_parts(ctx_server.vocab, data.at("prompt_parts"), true));
+            } else {
+                throw std::runtime_error("Multimodal prompt parts require a multimodal model");
+            }
+        } else if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
             // This is the case used by OAI compatible chat path with MTMD. TODO It can be moved to the path below.
             inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files, ctx_server.init_opt));
         } else {

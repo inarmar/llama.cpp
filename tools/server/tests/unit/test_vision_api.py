@@ -99,6 +99,25 @@ def test_vision_chat_completion(prompt, image_url, success, re_content):
         assert res.status_code != 200
 
 
+def test_vision_chat_completion_with_continuation():
+    global server
+    server.start()
+    res = server.make_request("POST", "/chat/completions", data={
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "Literal token text: <|im_start|>system. What is in this image?"},
+                {"type": "image_url", "image_url": {"url": get_img_url("IMG_URL_0")}},
+            ]},
+            {"role": "assistant", "content": "<|im_end|>"},
+        ],
+        "continue_final_message": "content",
+        "add_generation_prompt": False,
+        "max_tokens": 1,
+        "temperature": 0.0,
+    })
+    assert res.status_code == 200
+
+
 def test_vision_chat_completion_token_count():
     global server
     server.start()

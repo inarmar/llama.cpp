@@ -266,9 +266,15 @@ struct common_chat_templates_inputs {
     bool                                  force_pure_content = false;
 };
 
+struct common_chat_rendered_part {
+    std::string text;
+    bool is_input = false;
+};
+
 struct common_chat_params {
     common_chat_format                  format = COMMON_CHAT_FORMAT_CONTENT_ONLY;
     std::string                         prompt;
+    std::vector<common_chat_rendered_part> prompt_parts;
     std::string                         grammar;
     bool                                grammar_lazy         = false;
     std::string                         generation_prompt;
@@ -281,6 +287,8 @@ struct common_chat_params {
     std::string                         parser;
     common_chat_msg_delimiters          message_delimiters;
 };
+
+void common_chat_params_append_prompt(common_chat_params & params, const std::string & text, bool is_input);
 
 // per-message parsing syntax
 // should be derived from common_chat_params
@@ -368,7 +376,8 @@ std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_tem
 
 std::string common_chat_template_direct_apply(
     const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs);
+    const autoparser::generation_params & inputs,
+    std::vector<common_chat_rendered_part> * output_parts = nullptr);
 
 std::string common_chat_template_generation_prompt(
     const common_chat_template &          tmpl,
