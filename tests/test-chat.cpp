@@ -7655,7 +7655,11 @@ static void test_prompt_parts_special_suffix() {
             assert_equals(true, std::find(ordinary.begin(), ordinary.end(), id) == ordinary.end());
             data.score = original_score;
             data.attr = LLAMA_TOKEN_ATTR_USER_DEFINED;
-            assert_equals(true, ordinary == common_tokenize_with_ranges(eos_vocab, "hello", false, {{0, 5, false}}));
+            const auto trusted = common_tokenize(eos_vocab, "hello", false, true);
+            if (std::find(trusted.begin(), trusted.end(), id) == trusted.end()) throw std::runtime_error("UGM fixture does not select the added token");
+            const auto blocked = common_tokenize_with_ranges(eos_vocab, "hello", false, {{0, 5, false}});
+            if (std::find(blocked.begin(), blocked.end(), id) != blocked.end()) throw std::runtime_error("UGM selected an added token from untrusted text");
+            assert_equals(true, ordinary == blocked);
             assert_equals(true, ordinary == common_tokenize_with_ranges(eos_vocab, "hello", false, {{0, 2, true}, {2, 5, false}}));
             assert_equals(true, common_tokenize(eos_vocab, "hello", false, true) == common_tokenize_with_ranges(eos_vocab, "hello", false, {{0, 5, true}}));
             assert_equals(true, common_tokenize(eos_vocab, "hello", false, true) == common_tokenize_with_ranges(eos_vocab, "hello", false, {{0, 2, true}, {2, 5, true}}));
@@ -7670,11 +7674,14 @@ static void test_prompt_parts_special_suffix() {
     check_eos("models/ggml-vocab-llama-bpe.gguf", LLAMA_VOCAB_TYPE_BPE, overrides);
     check_eos("models/ggml-vocab-llama-spm.gguf", LLAMA_VOCAB_TYPE_SPM, overrides);
 
-    llama_model_kv_override ugm_overrides[3] = {};
+    llama_model_kv_override ugm_overrides[4] = {};
     ugm_overrides[0].tag = LLAMA_KV_OVERRIDE_TYPE_STR;
     std::strcpy(ugm_overrides[0].key, "tokenizer.ggml.model");
     std::strcpy(ugm_overrides[0].val_str, "t5");
     ugm_overrides[1] = overrides[0];
+    ugm_overrides[2].tag = LLAMA_KV_OVERRIDE_TYPE_BOOL;
+    std::strcpy(ugm_overrides[2].key, "tokenizer.ggml.add_space_prefix");
+    ugm_overrides[2].val_bool = true;
     check_eos("models/ggml-vocab-llama-spm.gguf", LLAMA_VOCAB_TYPE_UGM, ugm_overrides);
 
     llama_backend_free();
