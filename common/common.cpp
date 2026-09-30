@@ -1801,6 +1801,18 @@ std::vector<llama_token> common_tokenize(
     return result;
 }
 
+std::vector<llama_token> common_tokenize_with_ranges(
+        const llama_vocab * vocab, const std::string & text, bool add_special,
+        const std::vector<llama_tokenize_range> & ranges) {
+    if (text.size() > size_t(INT32_MAX)) throw std::runtime_error("tokenizer text too large");
+    int32_t count = llama_tokenize_with_ranges(vocab, text.data(), text.size(), nullptr, 0, add_special, ranges.data(), ranges.size());
+    if (count == INT32_MIN) throw std::runtime_error("invalid tokenizer ranges or overflow");
+    std::vector<llama_token> tokens(-count);
+    const int32_t result = llama_tokenize_with_ranges(vocab, text.data(), text.size(), tokens.data(), tokens.size(), add_special, ranges.data(), ranges.size());
+    if (result != -count) throw std::runtime_error("tokenization failed");
+    return tokens;
+}
+
 std::string common_token_to_piece(const struct llama_context * ctx, llama_token token, bool special) {
     const llama_model * model = llama_get_model(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);

@@ -179,8 +179,8 @@ const func_builtins & global_builtins();
 
 std::string value_to_json(const value & val, int indent = -1, const std::string_view item_sep = ", ", const std::string_view key_sep = ": ");
 
-// Note: only used for debugging purposes
-std::string value_to_string_repr(const value & val);
+string value_to_json_string(const value & val, int indent = -1, const string & item_sep = string(", "), const string & key_sep = string(": "));
+string value_to_string_repr(const value & val);
 
 struct not_implemented_exception : public std::runtime_error {
     not_implemented_exception(const std::string & msg) : std::runtime_error("NotImplemented: " + msg) {}
@@ -399,18 +399,13 @@ struct value_array_t : public value_t {
     virtual const std::vector<value> & as_array() const override { return val_arr; }
     virtual string as_string() const override {
         const bool immutable = is_immutable();
-        std::ostringstream ss;
-        ss << (immutable ? "(" : "[");
-        for (size_t i = 0; i < val_arr.size(); i++) {
-            if (i > 0) ss << ", ";
-            value val = val_arr.at(i);
-            ss << value_to_string_repr(val);
+        string result(immutable ? "(" : "[");
+        for (size_t i = 0; i < val_arr.size(); ++i) {
+            if (i > 0) result.append(string(", "));
+            result.append(value_to_string_repr(val_arr[i]));
         }
-        if (immutable && val_arr.size() == 1) {
-            ss << ",";
-        }
-        ss << (immutable ? ")" : "]");
-        return ss.str();
+        if (immutable && val_arr.size() == 1) result.append(string(","));
+        return result.append(string(immutable ? ")" : "]"));
     }
     virtual bool as_bool() const override {
         return !val_arr.empty();
@@ -507,15 +502,13 @@ struct value_object_t : public value_t {
     virtual bool is_immutable() const override { return false; }
     virtual const std::vector<std::pair<value, value>> & as_ordered_object() const override { return val_obj; }
     virtual string as_string() const override {
-        std::ostringstream ss;
-        ss << "{";
-        for (size_t i = 0; i < val_obj.size(); i++) {
-            if (i > 0) ss << ", ";
-            auto & [key, val] = val_obj.at(i);
-            ss << value_to_string_repr(key) << ": " << value_to_string_repr(val);
+        string result("{");
+        for (size_t i = 0; i < val_obj.size(); ++i) {
+            if (i > 0) result.append(string(", "));
+            const auto & pair = val_obj[i];
+            result.append(value_to_string_repr(pair.first)).append(string(": ")).append(value_to_string_repr(pair.second));
         }
-        ss << "}";
-        return ss.str();
+        return result.append(string("}"));
     }
     virtual bool as_bool() const override {
         return !unordered.empty();

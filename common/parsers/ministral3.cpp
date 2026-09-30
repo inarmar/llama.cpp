@@ -51,7 +51,7 @@ common_chat_params common_chat_params_init_ministral_3(const common_chat_templat
     data.supports_thinking  = true;
     data.thinking_start_tag = "[THINK]";
     data.thinking_end_tags  = {"[/THINK]"};
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, /* messages_override = */ adjusted_messages);
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, /* messages_override = */ adjusted_messages, std::nullopt, std::nullopt, &data.prompt_parts);
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs, /* messages_override = */ adjusted_messages);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.preserved_tokens  = {
@@ -65,11 +65,13 @@ common_chat_params common_chat_params_init_ministral_3(const common_chat_templat
         const auto & msg = inputs.continue_msg;
 
         data.generation_prompt = "[THINK]" + msg.reasoning_content;
+        common_chat_params_append_prompt(data, "[THINK]", false);
+        common_chat_params_append_prompt(data, msg.reasoning_content, true);
         if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
             data.generation_prompt += "[/THINK]" + msg.render_content();
+            common_chat_params_append_prompt(data, "[/THINK]", false);
+            common_chat_params_append_prompt(data, msg.render_content(), true);
         }
-
-        data.prompt += data.generation_prompt;
     }
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {

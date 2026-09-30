@@ -969,6 +969,108 @@ server_tokens process_mtmd_prompt(
     return result;
 }
 
+server_tokens process_mtmd_prompt_parts(
+        mtmd_context * mctx,
+        const json & prompt_parts,
+        const std::vector<raw_buffer> & files,
+        const mtmd_helper_init_opt & init_opt) {
+    if (mctx == nullptr) {
+        throw std::runtime_error("Multimodal prompt parts require a multimodal context");
+    }
+    if (!prompt_parts.is_array()) {
+        throw std::runtime_error("prompt_parts must be an array");
+    }
+
+    struct provenance_span {
+        size_t begin;
+        size_t end;
+        bool is_input;
+        bool is_media;
+    };
+    std::string prompt;
+    std::vector<provenance_span> spans;
+    for (const auto & part : prompt_parts) {
+        if (!part.is_object() || !part.contains("text") || !part.at("text").is_string() ||
+            !part.contains("is_input") || !part.at("is_input").is_boolean()) {
+            throw std::runtime_error("prompt_parts items must contain text and is_input");
+        }
+        if (part.contains("is_media") && !part.at("is_media").is_boolean()) {
+            throw std::runtime_error("prompt_parts is_media must be a boolean");
+        }
+        const size_t begin = prompt.size();
+        prompt += part.at("text").get<std::string>();
+        if (prompt.size() > begin) {
+            const bool is_input = part.at("is_input").get<bool>();
+            const bool is_media = part.value("is_media", false);
+            spans.push_back({ begin, prompt.size(), is_input, is_media });
+        }
+    }
+
+    mtmd::bitmaps bitmaps;
+    std::vector<mtmd_helper::video_ptr> videos;
+    for (const auto & file : files) {
+        auto out = mtmd_helper_bitmap_init_from_buf(mctx, file.data(), file.size(), false, init_opt);
+        if (!out.bitmap) {
+            throw std::runtime_error("Failed to load image or audio file");
+        }
+        bitmaps.entries.emplace_back(out.bitmap);
+        if (out.video_ctx) {
+            videos.emplace_back(out.video_ctx);
+        }
+    }
+
+    const char * marker = mtmd_get_marker(mctx);
+    if (marker == nullptr || marker[0] == '\0') {
+        throw std::runtime_error("Multimodal media marker is empty");
+    }
+    const size_t marker_size = std::strlen(marker);
+    size_t marker_count = 0;
+    for (const auto & span : spans) {
+        if (span.is_media) {
+            if (!span.is_input || span.end - span.begin != marker_size || prompt.compare(span.begin, marker_size, marker) != 0) {
+                throw std::runtime_error("invalid media marker prompt part");
+            }
+            marker_count++;
+        }
+    }
+    if (marker_count != files.size()) {
+        throw std::runtime_error(string_format("number of media markers in text (%zu) does not match number of files (%zu)", marker_count, files.size()));
+    }
+
+    std::vector<mtmd_input_text> texts;
+    std::vector<mtmd_input_part> parts;
+    texts.reserve(spans.size());
+    parts.reserve(spans.size());
+
+    auto bitmaps_c_ptr = bitmaps.c_ptr();
+    size_t bitmap_idx = 0;
+    for (const auto & span : spans) {
+        if (span.is_media) {
+            parts.push_back({ nullptr, bitmaps_c_ptr[bitmap_idx++] });
+        } else {
+            texts.push_back({ prompt.data() + span.begin, span.end - span.begin, false, !span.is_input });
+            parts.push_back({ &texts.back(), nullptr });
+        }
+    }
+    if (parts.empty()) {
+        texts.push_back({ prompt.data(), prompt.size(), false, true });
+        parts.push_back({ &texts.back(), nullptr });
+    }
+
+    std::vector<const mtmd_input_part *> parts_ptr;
+    parts_ptr.reserve(parts.size());
+    for (const auto & part : parts) {
+        parts_ptr.push_back(&part);
+    }
+
+    mtmd::input_chunks chunks(mtmd_input_chunks_init());
+    const int32_t tokenized = mtmd_tokenize_from_parts(mctx, chunks.ptr.get(), parts_ptr.data(), parts_ptr.size(), true);
+    if (tokenized != 0) {
+        throw std::runtime_error("Failed to tokenize prompt parts");
+    }
+    return server_tokens(chunks, true);
+}
+
 /**
  * tokenize a single input "prompt" object
  * use tokenize_input_prompts() if the input could be an array.
@@ -1026,6 +1128,25 @@ std::vector<server_tokens> tokenize_input_prompts(const llama_vocab * vocab, mtm
         throw std::runtime_error("\"prompt\" must not be empty");
     }
     return result;
+}
+
+server_tokens tokenize_prompt_parts(const llama_vocab * vocab, const json & prompt_parts, bool add_special) {
+    if (!prompt_parts.is_array()) {
+        throw std::runtime_error("prompt_parts must be an array");
+    }
+
+    std::string text;
+    std::vector<llama_tokenize_range> ranges;
+    for (const auto & part : prompt_parts) {
+        if (!part.is_object() || !part.contains("text") || !part.at("text").is_string() ||
+            !part.contains("is_input") || !part.at("is_input").is_boolean()) {
+            throw std::runtime_error("prompt_parts items must contain text and is_input");
+        }
+        const size_t begin = text.size();
+        text += part.at("text").get<std::string>();
+        if (text.size() > begin) ranges.push_back({begin, text.size(), !part.at("is_input").get<bool>()});
+    }
+    return server_tokens(common_tokenize_with_ranges(vocab, text, add_special, ranges), false);
 }
 
 //
@@ -1148,7 +1269,7 @@ static void handle_media(
 }
 
 // load media files from an OAI content array, then replace each media part with a media marker text part
-static void oaicompat_content_load_media(json & content, const server_chat_params & opt, std::vector<raw_buffer> & out_files) {
+static void oaicompat_content_load_media(json & content, const server_chat_params & opt, std::vector<raw_buffer> & out_files, const std::string & marker = get_media_marker()) {
     for (auto & p : content) {
         std::string type = json_value(p, "type", std::string());
         if (type == "image_url") {
@@ -1161,7 +1282,7 @@ static void oaicompat_content_load_media(json & content, const server_chat_param
             handle_media(out_files, url, opt.media_path);
 
             p["type"] = "media_marker";
-            p["text"] = get_media_marker();
+            p["text"] = marker;
             p.erase("image_url");
 
         } else if (type == "input_audio") {
@@ -1176,7 +1297,7 @@ static void oaicompat_content_load_media(json & content, const server_chat_param
             handle_media(out_files, url, opt.media_path);
 
             p["type"] = "media_marker";
-            p["text"] = get_media_marker();
+            p["text"] = marker;
             p.erase("input_audio");
 
         } else if (type == "input_video" || type == "video_url") {
@@ -1191,7 +1312,7 @@ static void oaicompat_content_load_media(json & content, const server_chat_param
             handle_media(out_files, url, opt.media_path);
 
             p["type"] = "media_marker";
-            p["text"] = get_media_marker();
+            p["text"] = marker;
             p.erase("input_video");
             p.erase("video_url");
 
@@ -1226,6 +1347,10 @@ json oaicompat_chat_params_parse(
     const server_chat_params & opt,
     std::vector<raw_buffer> & out_files)
 {
+    if (body.contains("prompt_parts") || body.contains("mark_input")) {
+        throw std::invalid_argument("client trust metadata is not allowed");
+    }
+
     json llama_params;
 
     auto tools = json_value(body, "tools", json());
@@ -1284,6 +1409,18 @@ json oaicompat_chat_params_parse(
     if (!messages.is_array()) {
         throw std::invalid_argument("Expected 'messages' to be an array");
     }
+    std::string media_placeholder;
+    auto media_text = [&]() -> std::string {
+        if (!opt.use_jinja) {
+            return get_media_marker();
+        }
+        if (media_placeholder.empty()) {
+            do {
+                media_placeholder = "<__media_" + random_string() + "__>";
+            } while (media_placeholder == get_media_marker() || body.dump().find(media_placeholder) != std::string::npos);
+        }
+        return media_placeholder;
+    };
     for (auto & msg : messages) {
         std::string role = json_value(msg, "role", std::string());
         if (role != "assistant" && !msg.contains("content")) {
@@ -1306,7 +1443,7 @@ json oaicompat_chat_params_parse(
             throw std::invalid_argument("Expected 'content' to be a string or an array");
         }
 
-        oaicompat_content_load_media(content, opt, out_files);
+        oaicompat_content_load_media(content, opt, out_files, media_text());
     }
 
     auto caps = common_chat_templates_get_caps(opt.tmpls.get());
@@ -1387,6 +1524,43 @@ json oaicompat_chat_params_parse(
 
     llama_params["chat_format"] = static_cast<int>(chat_params.format);
     llama_params["prompt"]      = chat_params.prompt;
+    if (!media_placeholder.empty() && chat_params.prompt_parts.empty()) {
+        throw std::runtime_error("chat template lost media marker provenance");
+    }
+    if (inputs.use_jinja) {
+        common_chat_params_validate(chat_params);
+        std::string restored_prompt;
+        auto prompt_parts = json::array();
+        size_t media_count = 0;
+        for (const auto & part : chat_params.prompt_parts) {
+            size_t begin = 0;
+            size_t pos;
+            while (!media_placeholder.empty() && (pos = part.text.find(media_placeholder, begin)) != std::string::npos) {
+                if (!part.is_input) {
+                    throw std::runtime_error("media marker is not marked as input");
+                }
+                if (pos > begin) {
+                    const auto text = part.text.substr(begin, pos - begin);
+                    prompt_parts.push_back({ { "text", text }, { "is_input", part.is_input } });
+                    restored_prompt += text;
+                }
+                prompt_parts.push_back({ { "text", get_media_marker() }, { "is_input", true }, { "is_media", true } });
+                restored_prompt += get_media_marker();
+                media_count++;
+                begin = pos + media_placeholder.size();
+            }
+            if (begin < part.text.size()) {
+                const auto text = part.text.substr(begin);
+                prompt_parts.push_back({ { "text", text }, { "is_input", part.is_input } });
+                restored_prompt += text;
+            }
+        }
+        if (!media_placeholder.empty() && media_count != out_files.size()) {
+            throw std::runtime_error("chat template changed the media markers");
+        }
+        llama_params["prompt"] = std::move(restored_prompt);
+        llama_params["prompt_parts"] = std::move(prompt_parts);
+    }
     if (!chat_params.grammar.empty()) {
         llama_params["grammar"]      = chat_params.grammar;
         llama_params["grammar_type"] = std::string("tool_calls");

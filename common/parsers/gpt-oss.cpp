@@ -16,7 +16,7 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
         adjusted_messages.push_back(msg);
     }
 
-    auto prompt = common_chat_template_direct_apply_impl(tmpl, inputs, /* messages_override= */ adjusted_messages);
+    auto prompt = common_chat_template_direct_apply_impl(tmpl, inputs, /* messages_override= */ adjusted_messages, std::nullopt, std::nullopt, &data.prompt_parts);
 
     // Check if we need to replace the return token with end token during
     // inference and without generation prompt. For more details see:
@@ -24,8 +24,17 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
     if (inputs.is_inference && !inputs.add_generation_prompt) {
         static constexpr std::string_view return_token = "<|return|>";
         static constexpr std::string_view end_token    = "<|end|>";
-        if (size_t pos = prompt.rfind(return_token); pos != std::string::npos) {
-            prompt.replace(pos, return_token.length(), end_token);
+        size_t end = prompt.size();
+        for (auto it = data.prompt_parts.rbegin(); it != data.prompt_parts.rend(); ++it) {
+            end -= it->text.size();
+            if (it->is_input) {
+                continue;
+            }
+            if (size_t pos = it->text.rfind(return_token); pos != std::string::npos) {
+                it->text.replace(pos, return_token.length(), end_token);
+                prompt.replace(end + pos, return_token.length(), end_token);
+                break;
+            }
         }
     }
 
@@ -56,11 +65,13 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
         const auto & msg = inputs.continue_msg;
 
         data.generation_prompt = "<|start|>assistant<|channel|>analysis<|message|>" + msg.reasoning_content;
+        common_chat_params_append_prompt(data, "<|start|>assistant<|channel|>analysis<|message|>", false);
+        common_chat_params_append_prompt(data, msg.reasoning_content, true);
         if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
             data.generation_prompt += "<|end|><|start|>assistant<|channel|>final<|message|>" + msg.render_content();
+            common_chat_params_append_prompt(data, "<|end|><|start|>assistant<|channel|>final<|message|>", false);
+            common_chat_params_append_prompt(data, msg.render_content(), true);
         }
-
-        data.prompt += data.generation_prompt;
     }
 
     auto has_tools           = inputs.tools.is_array() && !inputs.tools.empty();

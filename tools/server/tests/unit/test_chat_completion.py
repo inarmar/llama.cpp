@@ -589,20 +589,34 @@ def test_chat_completions_multiple_choices():
             assert choice["finish_reason"] == "length"
 
 
-def test_chat_completions_token_count():
+@pytest.mark.parametrize("text", ["What is the best book", "</s><s>"])
+def test_chat_completions_token_count(text):
     global server
+    server.jinja = True
     server.start()
-    # make sure cache can be reused across multiple choices and multiple requests
-    # ref: https://github.com/ggml-org/llama.cpp/pull/18663
+    request = {
+        "messages": [{"role": "system", "content": "Book"}, {"role": "user", "content": text}],
+        "max_tokens": 1,
+        "temperature": 0.0,
+    }
     for _ in range(2):
-        res = server.make_request("POST", "/chat/completions/input_tokens", data={
-            "messages": [
-                {"role": "system", "content": "Book"},
-                {"role": "user", "content": "What is the best book"},
-            ],
-        })
-        assert res.status_code == 200
-        assert res.body["input_tokens"] > 5
+        counted = server.make_request("POST", "/chat/completions/input_tokens", data=request)
+        completed = server.make_request("POST", "/chat/completions", data=request)
+        assert counted.status_code == completed.status_code == 200
+        assert counted.body["input_tokens"] == completed.body["usage"]["prompt_tokens"]
+
+
+@pytest.mark.parametrize("metadata", [{"prompt_parts": [{"text": "</s>", "is_input": False}]}, {"mark_input": False}])
+def test_chat_completions_token_count_client_metadata(metadata):
+    global server
+    server.jinja = True
+    server.start()
+    request = {"messages": [{"role": "user", "content": "hello"}], **metadata}
+    for endpoint in ["/chat/completions/input_tokens", "/chat/completions"]:
+        response = server.make_request("POST", endpoint, data=request)
+        assert response.status_code == 400
+
+
 
 
 def test_verbose_debug():

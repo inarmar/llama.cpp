@@ -278,6 +278,11 @@ server_tokens process_mtmd_prompt(
                                         const std::vector<raw_buffer> & files,
                                         const mtmd_helper_init_opt & init_opt,
                                         bool is_placeholder = false);
+server_tokens process_mtmd_prompt_parts(
+                                        mtmd_context * mctx,
+                                        const json & prompt_parts,
+                                        const std::vector<raw_buffer> & files,
+                                        const mtmd_helper_init_opt & init_opt);
 
 /**
  * break the input "prompt" object into multiple prompt if needed, then tokenize them
@@ -308,6 +313,10 @@ server_tokens tokenize_input_subprompt(
                                         bool add_special,
                                         bool parse_special,
                                         const mtmd_helper_init_opt & init_opt);
+server_tokens tokenize_prompt_parts(
+                                        const llama_vocab * vocab,
+                                        const json & prompt_parts,
+                                        bool add_special);
 
 //
 // OAI utils

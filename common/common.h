@@ -1127,6 +1127,10 @@ std::vector<llama_token> common_tokenize(
 
 // tokenizes a token into a piece, optionally renders special/control tokens
 // should work similar to Python's `tokenizer.id_to_piece`
+std::vector<llama_token> common_tokenize_with_ranges(
+    const llama_vocab * vocab, const std::string & text, bool add_special,
+    const std::vector<llama_tokenize_range> & ranges);
+
 std::string common_token_to_piece(
         const struct llama_context * ctx,
                        llama_token   token,

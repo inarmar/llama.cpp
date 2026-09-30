@@ -266,12 +266,19 @@ struct common_chat_templates_inputs {
     bool                                  force_pure_content = false;
 };
 
+struct common_chat_rendered_part {
+    std::string text;
+    bool is_input = false;
+};
+
 struct common_chat_params {
     common_chat_format                  format = COMMON_CHAT_FORMAT_CONTENT_ONLY;
     std::string                         prompt;
+    std::vector<common_chat_rendered_part> prompt_parts;
     std::string                         grammar;
     bool                                grammar_lazy         = false;
     std::string                         generation_prompt;
+    std::vector<common_chat_rendered_part> generation_prompt_parts;
     bool                                supports_thinking    = false;
     std::string                         thinking_start_tag;  // e.g., "<think>"
     std::vector<std::string>            thinking_end_tags;   // e.g., "</think>"
@@ -281,6 +288,13 @@ struct common_chat_params {
     std::string                         parser;
     common_chat_msg_delimiters          message_delimiters;
 };
+
+bool common_chat_parts_are_trusted(const std::vector<common_chat_rendered_part> & parts, size_t begin, size_t count);
+std::vector<common_chat_rendered_part> common_chat_parts_slice(const std::vector<common_chat_rendered_part> & parts, size_t begin, size_t count = std::string::npos);
+void common_chat_params_append_prompt(common_chat_params & params, const std::vector<common_chat_rendered_part> & parts);
+void common_chat_params_validate(const common_chat_params & params);
+
+void common_chat_params_append_prompt(common_chat_params & params, const std::string & text, bool is_input);
 
 // per-message parsing syntax
 // should be derived from common_chat_params
@@ -368,11 +382,13 @@ std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_tem
 
 std::string common_chat_template_direct_apply(
     const common_chat_template & tmpl,
-    const autoparser::generation_params & inputs);
+    const autoparser::generation_params & inputs,
+    std::vector<common_chat_rendered_part> * output_parts = nullptr);
 
 std::string common_chat_template_generation_prompt(
     const common_chat_template &          tmpl,
-    const autoparser::generation_params & inputs);
+    const autoparser::generation_params & inputs,
+    std::vector<common_chat_rendered_part> * output_parts = nullptr);
 
 std::optional<common_chat_params> common_chat_try_specialized_template(
         const common_chat_template &          tmpl,

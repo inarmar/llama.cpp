@@ -1130,6 +1130,7 @@ struct mtmd_tokenizer {
     std::string input_text; // note: can contain null bytes; do not use c_str()
     bool add_special;
     bool parse_special;
+    bool use_ranges = false;
     const llama_vocab * vocab;
 
     using part = mtmd_internal_part;
@@ -1190,6 +1191,7 @@ struct mtmd_tokenizer {
             size_t n_parts,
             bool add_special) : ctx(ctx) {
         this->add_special = add_special;
+        use_ranges = true;
         parse_special = true; // only used for text returned by lazy bitmaps
         vocab         = ctx->vocab;
 
@@ -1259,9 +1261,29 @@ struct mtmd_tokenizer {
 
         auto merged_bitmaps = mtmd_group_mergeable_bitmaps(parts, n_merge_frames);
 
+        std::string text;
+        std::vector<llama_tokenize_range> ranges;
+        auto flush_text = [&]() {
+            if (text.empty()) return;
+            if (use_ranges) {
+                if (text.size() > size_t(INT32_MAX)) throw std::runtime_error("tokenizer text too large");
+                int32_t n = llama_tokenize_with_ranges(vocab, text.data(), text.size(), nullptr, 0, false, ranges.data(), ranges.size());
+                if (n == INT32_MIN) throw std::runtime_error("invalid text ranges or overflow");
+                std::vector<llama_token> tokens(n < 0 ? -n : n);
+                n = llama_tokenize_with_ranges(vocab, text.data(), text.size(), tokens.data(), tokens.size(), false, ranges.data(), ranges.size());
+                if (n < 0) throw std::runtime_error("text tokenization failed");
+                tokens.resize(n);
+                add_text(tokens);
+            } else {
+                add_text(text, parse_special);
+            }
+            text.clear();
+            ranges.clear();
+        };
         size_t i_bm = 0;
         for (const auto & p : parts) {
             if (p.bitmap != nullptr) {
+                flush_text();
                 if (i_bm >= merged_bitmaps.size()) {
                     LOG_ERR("%s: error: number of bitmaps (%zu) does not match number of markers (%zu)\n",
                             __func__, merged_bitmaps.size(), parts.size() - 1);
@@ -1273,9 +1295,13 @@ struct mtmd_tokenizer {
                     return res;
                 }
             } else {
-                add_text(p.text, p.parse_special);
+                const size_t begin = text.size();
+                text += p.text;
+                if (text.size() > begin) ranges.push_back({begin, text.size(), p.parse_special});
             }
         }
+
+        flush_text();
 
         if (vocab != nullptr) {
             if (add_special && llama_vocab_get_add_bos(vocab)) {

@@ -26,8 +26,8 @@ void caps_apply_preserve_reasoning(jinja::context & ctx, bool enabled) {
     ctx.set_val("drop_thinking",             mk_val<value_bool>(!enabled));
 }
 
-void caps_apply_reasoning_effort(jinja::context & ctx, const std::string & effort) {
-    value var = mk_val<value_string>(effort); // bind to the same value for stats
+void caps_apply_reasoning_effort(jinja::context & ctx, const std::string & effort, bool mark_input) {
+    value var = mk_val<value_string>(string(effort, mark_input)); // bind to the same value for stats
     ctx.set_val("reasoning_effort",   var);
     ctx.set_val("reasoning_strength", var);
 }

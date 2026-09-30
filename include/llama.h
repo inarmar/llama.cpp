@@ -1292,6 +1292,25 @@ extern "C" {
                                int32_t   lstrip,
                                   bool   special);
 
+    // Byte ranges must cover the text in order, without gaps or overlap.
+    struct llama_tokenize_range {
+        size_t begin;
+        size_t end;
+        bool allow_special;
+    };
+
+    // Like llama_tokenize with parse_special=true, but special spelling must be fully trusted.
+    // Returns INT32_MIN for invalid ranges or overflow. Pointers are borrowed for this call only.
+    LLAMA_API int32_t llama_tokenize_with_ranges(
+        const struct llama_vocab * vocab,
+                      const char * text,
+                         int32_t   text_len,
+              llama_token * tokens,
+                         int32_t   n_tokens_max,
+                            bool   add_special,
+        const struct llama_tokenize_range * ranges,
+                          size_t   n_ranges);
+
     /// @details Convert the provided tokens into text (inverse of llama_tokenize()).
     /// @param text The char pointer must be large enough to hold the resulting text.
     /// @return Returns the number of chars/bytes on success, no more than text_len_max.

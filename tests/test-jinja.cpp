@@ -2267,7 +2267,53 @@ static void test_string_parts(testing & t) {
             t.log("parts: " + std::to_string(res.parts.size()) + ", rendered: " + json(res.str()).dump());
         }
     });
-
+    t.test("string operations preserve byte sources", [](testing & t) {
+        struct example { std::string tmpl, bytes, flags; };
+        const json vars = {{"x", "AB"}, {"sep", "|"}, {"obj", {{"k", "v"}}}, {"n", "12"}};
+        const std::vector<example> cases = {
+            {"{{ ('t' ~ x ~ 'z').split('B')|join(sep) }}", "tA|z", "TIIT"},
+            {"{{ ('t' ~ x ~ 'z').rsplit('A')|join(sep) }}", "t|Bz", "TIIT"},
+            {"{{ ('t' ~ x ~ 'z').replace('A', sep) }}", "t|Bz", "TIIT"},
+            {"{{ ('t' ~ x ~ 'z').replace('', sep) }}", "|t|A|B|z|", "ITIIIIITI"},
+            {"{{ ('t' ~ x ~ 'z')[1:3] }}", "AB", "II"},
+            {"{{ ('t' ~ x ~ 'z')[::-1] }}", "zBAt", "TIIT"},
+            {"{{ ('t' ~ x ~ 'z')[1] }}", "A", "I"},
+            {"{{ ('t' ~ x ~ 'Z')|capitalize }}", "Tabz", "TIIT"},
+            {"{{ ('t' ~ x ~ 'Z')|title }}", "Tabz", "TIIT"},
+            {"{{ ('t' ~ x ~ '{}').format(sep) }}", "tAB|", "TIII"},
+            {"{{ ['t', x, 'z']|join(sep) }}", "t|AB|z", "TIIIIT"},
+            {"{{ ('t' ~ x)|indent(sep, first=true) }}", "|tAB", "ITII"},
+            {"{{ [x, 'z']|tojson(separators=(sep, sep)) }}", "[\"AB\"|\"z\"]", "TTIITITTTT"},
+            {"{{ 't' ~ x * 2 }}", "tABAB", "TIIII"},
+            {"{{ (' t ' ~ x ~ ' z ')|trim }}", "t AB z", "TTIITT"},
+            {"{{ obj|tojson }}", "{\"k\": \"v\"}", "TTITTTTITT"},
+            {"{{ obj|string }}", "{'k': 'v'}", "TTITTTTITT"},
+            {"{{ ['t', x]|string }}", "['t', 'AB']", "TTTTTTTIITT"},
+            {"{% if x %}literal{% endif %}{{ n|int }}", "literal12", "TTTTTTTTT"},
+        };
+        for (const auto & c : cases) {
+            const auto result = render(c.tmpl, vars);
+            std::string flags;
+            for (const auto & part : result.parts) flags.append(part.val.size(), part.is_input ? 'I' : 'T');
+            auto expected = c.flags;
+            expected.erase(std::remove(expected.begin(), expected.end(), ' '), expected.end());
+            t.assert_equal(c.tmpl + " bytes", c.bytes, result.str());
+            t.assert_equal(c.tmpl + " sources", expected, flags);
+        }
+    });
+    t.test("JSON escapes keep codepoint provenance", [](testing & t) {
+        jinja::string source;
+        source.append(jinja::string("\xc3")).append(jinja::string("\xa9", true));
+        jinja::context ctx;
+        ctx.set_val("x", jinja::mk_val<jinja::value_string>(source));
+        const std::string tmpl = "{{ x|tojson(ensure_ascii=true) }}";
+        jinja::lexer lexer;
+        const auto prog = jinja::parse_from_tokens(lexer.tokenize(tmpl));
+        jinja::runtime runtime(ctx);
+        const auto result = runtime.gather_string_parts(runtime.execute(prog))->as_string();
+        t.assert_equal("escaped bytes", std::string("\"\\u00e9\""), result.str());
+        t.assert_true("escape is input and quotes are trusted", result.parts.size() == 3 && !result.parts[0].is_input && result.parts[1].is_input && !result.parts[2].is_input);
+    });
 }
 
 static void test_template_cpp(testing & t, const std::string & name, const std::string & tmpl, const json & vars, const std::string & expect) {

@@ -175,6 +175,10 @@ struct llama_vocab {
                          bool   add_special,
                          bool   parse_special = false) const;
 
+    std::vector<llama_token> tokenize_with_ranges(
+            const std::string & text, bool add_special,
+            const llama_tokenize_range * ranges, size_t n_ranges) const;
+
     // does not write null-terminator to buf
     int32_t token_to_piece(
                   llama_token   token,

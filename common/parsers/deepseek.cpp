@@ -111,7 +111,7 @@ common_chat_params common_chat_params_init_deepseek_v3_2(const common_chat_templ
     };
 
     data.prompt = common_chat_template_direct_apply_impl(
-        tmpl, inputs, adjusted_messages, std::nullopt, additional_context);
+        tmpl, inputs, adjusted_messages, std::nullopt, additional_context, &data.prompt_parts);
     data.generation_prompt = common_chat_template_generation_prompt_impl(
         tmpl, inputs, adjusted_messages, std::nullopt, additional_context);
     data.format             = COMMON_CHAT_FORMAT_PEG_NATIVE;
@@ -129,17 +129,22 @@ common_chat_params common_chat_params_init_deepseek_v3_2(const common_chat_templ
 
         if (is_v4 && msg.reasoning_content.empty()) {
             data.generation_prompt = GEN_PROMPT + THINK_END;
+            common_chat_params_append_prompt(data, data.generation_prompt, false);
             if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
                 data.generation_prompt += msg.render_content();
+                common_chat_params_append_prompt(data, msg.render_content(), true);
             }
         } else {
             data.generation_prompt = GEN_PROMPT + THINK_START + msg.reasoning_content;
+            common_chat_params_append_prompt(data, GEN_PROMPT + THINK_START, false);
+            common_chat_params_append_prompt(data, msg.reasoning_content, true);
             if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
                 data.generation_prompt += THINK_END + msg.render_content();
+                common_chat_params_append_prompt(data, THINK_END, false);
+                common_chat_params_append_prompt(data, msg.render_content(), true);
             }
         }
 
-        data.prompt += data.generation_prompt;
     }
 
     bool require_tools   = inputs.tool_choice == COMMON_CHAT_TOOL_CHOICE_REQUIRED;

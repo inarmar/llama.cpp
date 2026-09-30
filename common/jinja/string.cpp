@@ -67,15 +67,6 @@ void string::hash_update(hasher & hash) const noexcept {
     }
 }
 
-bool string::all_parts_are_input() const {
-    for (const auto & part : parts) {
-        if (!part.is_input) {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool string::is_uppercase() const {
     for (const auto & part : parts) {
         if (!part.is_uppercase()) {
@@ -94,18 +85,45 @@ bool string::is_lowercase() const {
     return true;
 }
 
-// mark this string as input if other has ALL parts as input
-void string::mark_input_based_on(const string & other) {
-    if (other.all_parts_are_input()) {
-        for (auto & part : parts) {
-            part.is_input = true;
-        }
+string string::substr(size_t pos, size_t count) const {
+    const size_t len = length();
+    if (pos > len) {
+        throw std::out_of_range("jinja string offset");
     }
+    count = std::min(count, len - pos);
+    string result;
+    for (const auto & part : parts) {
+        if (pos >= part.val.size()) {
+            pos -= part.val.size();
+            continue;
+        }
+        const size_t n = std::min(count, part.val.size() - pos);
+        result.append(string(part.val.substr(pos, n), part.is_input));
+        count -= n;
+        pos = 0;
+        if (count == 0) break;
+    }
+    return result;
+}
+
+bool string::has_input(size_t pos, size_t count) const {
+    for (const auto & part : substr(pos, count).parts) {
+        if (part.is_input) return true;
+    }
+    return false;
 }
 
 string & string::append(const string & other) {
+    if (&other == this) {
+        return append(string(other));
+    }
     for (const auto & part : other.parts) {
-        parts.push_back(part);
+        if (part.val.empty()) continue;
+        if (!parts.empty() && parts.back().is_input == part.is_input) {
+            parts.back().val += part.val;
+        } else {
+            parts.push_back(part);
+        }
     }
     return *this;
 }
@@ -123,43 +141,43 @@ static string apply_transform(string & self, const transform_fn & fn) {
 string string::uppercase() {
     return apply_transform(*this, [](const std::string & s) {
         std::string res = s;
-        std::transform(res.begin(), res.end(), res.begin(), ::toupper);
+        std::transform(res.begin(), res.end(), res.begin(), [](unsigned char c) { return ::toupper(c); });
         return res;
     });
 }
 string string::lowercase() {
     return apply_transform(*this, [](const std::string & s) {
         std::string res = s;
-        std::transform(res.begin(), res.end(), res.begin(), ::tolower);
+        std::transform(res.begin(), res.end(), res.begin(), [](unsigned char c) { return ::tolower(c); });
         return res;
     });
 }
 string string::capitalize() {
-    return apply_transform(*this, [](const std::string & s) {
-        if (s.empty()) return s;
-        std::string res = s;
-        res[0] = ::toupper(static_cast<unsigned char>(res[0]));
-        std::transform(res.begin() + 1, res.end(), res.begin() + 1, ::tolower);
-        return res;
-    });
+    bool first = true;
+    for (auto & part : parts) {
+        for (char & c : part.val) {
+            c = first ? ::toupper(static_cast<unsigned char>(c)) : ::tolower(static_cast<unsigned char>(c));
+            first = false;
+        }
+    }
+    return *this;
 }
+
 string string::titlecase() {
-    return apply_transform(*this, [](const std::string & s) {
-        std::string res = s;
-        bool capitalize_next = true;
-        for (char &c : res) {
+    bool capitalize_next = true;
+    for (auto & part : parts) {
+        for (char & c : part.val) {
             if (isspace(static_cast<unsigned char>(c))) {
                 capitalize_next = true;
-            } else if (capitalize_next) {
-                c = ::toupper(static_cast<unsigned char>(c));
-                capitalize_next = false;
             } else {
-                c = ::tolower(static_cast<unsigned char>(c));
+                c = capitalize_next ? ::toupper(static_cast<unsigned char>(c)) : ::tolower(static_cast<unsigned char>(c));
+                capitalize_next = false;
             }
         }
-        return res;
-    });
+    }
+    return *this;
 }
+
 string string::strip(bool left, bool right, std::optional<const std::string_view> chars) {
     static auto strip_part = [](const std::string & s, bool left, bool right, std::optional<const std::string_view> chars) -> std::string {
         size_t start = 0;

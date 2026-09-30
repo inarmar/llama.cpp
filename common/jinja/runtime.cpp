@@ -900,9 +900,9 @@ value member_expression::execute_impl(context & ctx) const {
                     val = arr[index];
                 }
             } else { // value_string
-                auto str = object->as_string().str();
+                auto str = object->as_string();
                 if (index >= 0 && index < static_cast<int64_t>(str.size())) {
-                    val = mk_val<value_string>(std::string(1, str[index]));
+                    val = mk_val<value_string>(str.substr(index, 1));
                 }
             }
 

@@ -6,7 +6,7 @@ common_chat_params common_chat_params_init_gigachat_v3(
 
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt, &data.prompt_parts);
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = false;
@@ -18,7 +18,8 @@ common_chat_params common_chat_params_init_gigachat_v3(
     if (inputs.has_continuation()) {
         const auto & msg = inputs.continue_msg;
         data.generation_prompt = "assistant<|role_sep|>\n" + msg.render_content();
-        data.prompt += data.generation_prompt;
+        common_chat_params_append_prompt(data, "assistant<|role_sep|>\n", false);
+        common_chat_params_append_prompt(data, msg.render_content(), true);
     }
 
     auto has_tools         = inputs.tools.is_array() && !inputs.tools.empty();

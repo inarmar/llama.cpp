@@ -35,6 +35,6 @@ struct caps {
 caps caps_get(jinja::program & prog);
 
 void caps_apply_preserve_reasoning(jinja::context & ctx, bool enabled);
-void caps_apply_reasoning_effort(jinja::context & ctx, const std::string & effort);
+void caps_apply_reasoning_effort(jinja::context & ctx, const std::string & effort, bool mark_input = false);
 
 } // namespace jinja

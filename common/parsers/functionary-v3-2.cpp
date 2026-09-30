@@ -5,7 +5,7 @@ common_chat_params common_chat_params_init_functionary_v3_2(const common_chat_te
                                                                    const autoparser::generation_params & inputs) {
     common_chat_params data;
 
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt, &data.prompt_parts);
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs);
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.preserved_tokens  = {
@@ -18,7 +18,8 @@ common_chat_params common_chat_params_init_functionary_v3_2(const common_chat_te
     if (inputs.has_continuation()) {
         const auto & msg = inputs.continue_msg;
         data.generation_prompt = "<|start_header_id|>assistant<|end_header_id|>\n\n>>>all\n" + msg.render_content();
-        data.prompt += data.generation_prompt;
+        common_chat_params_append_prompt(data, "<|start_header_id|>assistant<|end_header_id|>\n\n>>>all\n", false);
+        common_chat_params_append_prompt(data, msg.render_content(), true);
     }
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {

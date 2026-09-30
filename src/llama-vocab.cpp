@@ -21,6 +21,7 @@
 #include <queue>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 //
 // helpers
@@ -108,6 +109,23 @@ struct llm_bigram_spm {
     size_t size;
 };
 
+static bool token_requires_trust(const llama_vocab & vocab, llama_token id) {
+    return id != LLAMA_TOKEN_NULL && (vocab.get_token_data(id).attr &
+        (LLAMA_TOKEN_ATTR_CONTROL | LLAMA_TOKEN_ATTR_USER_DEFINED | LLAMA_TOKEN_ATTR_UNKNOWN));
+}
+
+static bool bytes_allow_special(const llama_tokenize_range * ranges, size_t n_ranges, size_t begin, size_t end) {
+    for (size_t i = 0; i < n_ranges; ++i) {
+        if (ranges[i].begin >= end) break;
+        if (ranges[i].end > begin && !ranges[i].allow_special) return false;
+    }
+    return true;
+}
+
+static bool bytes_allow_special(const std::vector<uint8_t> & allowed, size_t begin, size_t end) {
+    return allowed.empty() || std::all_of(allowed.begin() + begin, allowed.begin() + end, [](uint8_t v) { return v != 0; });
+}
+
 struct llm_tokenizer_spm : llm_tokenizer {
     llm_tokenizer_spm(const llama_vocab & /*vocab*/) {}
 };
@@ -115,7 +133,10 @@ struct llm_tokenizer_spm : llm_tokenizer {
 struct llm_tokenizer_spm_session {
     llm_tokenizer_spm_session(const llama_vocab & vocab) : vocab(vocab) {}
 
+    std::vector<uint8_t> allowed;
+
     void tokenize(const std::string & text, std::vector<llama_token> & output) {
+        input = text.data();
         // split string into utf8 chars
         int index = 0;
         size_t offs = 0;
@@ -174,9 +195,16 @@ struct llm_tokenizer_spm_session {
     }
 
 private:
+    const char * input = nullptr;
+    llama_token lookup(const char * text, size_t len) const {
+        const auto id = vocab.text_to_token(std::string(text, len));
+        if (token_requires_trust(vocab, id) && !bytes_allow_special(allowed, text - input, text - input + len)) return LLAMA_TOKEN_NULL;
+        return id;
+    }
+
     void resegment(llm_symbol & symbol, std::vector<llama_token> & output) {
         auto text = std::string(symbol.text, symbol.n);
-        auto token = vocab.text_to_token(text);
+        auto token = lookup(symbol.text, symbol.n);
 
         // Do we need to support is_unused?
         if (token != LLAMA_TOKEN_NULL) {
@@ -205,7 +233,7 @@ private:
             return;
         }
         const std::string text = std::string(symbols[left].text, symbols[left].n + symbols[right].n);
-        auto token = vocab.text_to_token(text);
+        auto token = lookup(symbols[left].text, symbols[left].n + symbols[right].n);
 
         if (token == LLAMA_TOKEN_NULL) {
             return;
@@ -616,6 +644,8 @@ struct llm_tokenizer_bpe_session {
         }
     }
 
+    std::vector<uint8_t> allowed;
+
     virtual void tokenize(const std::string & text, std::vector<llama_token> & output) {
         int final_prev_index = -1;
         const auto word_collection = unicode_regex_split(text, tokenizer.regex_exprs, tokenizer.byte_encode);
@@ -623,7 +653,37 @@ struct llm_tokenizer_bpe_session {
         symbols_final.clear();
         auto tok_pre = vocab.get_pre_type();
 
+        forbidden.clear();
+        std::vector<uint8_t> encoded_allowed;
+        if (!allowed.empty()) {
+            for (size_t pos = 0; pos < text.size();) {
+                const size_t begin = pos;
+                uint32_t cpt;
+                try {
+                    cpt = unicode_cpt_from_utf8(text, pos);
+                } catch (const std::invalid_argument &) {
+                    ++pos;
+                    cpt = 0xFFFD;
+                }
+                const size_t n = unicode_cpt_to_utf8(cpt).size();
+                if (pos - begin == n) {
+                    encoded_allowed.insert(encoded_allowed.end(), allowed.begin() + begin, allowed.begin() + pos);
+                } else {
+                    encoded_allowed.insert(encoded_allowed.end(), n, bytes_allow_special(allowed, begin, pos));
+                }
+            }
+        }
+        size_t source_offset = 0;
         for (const auto & word : word_collection) {
+            if (!allowed.empty()) {
+                for (size_t pos = 0; pos < word.size();) {
+                    const size_t n = tokenizer.byte_encode ? unicode_len_utf8(word[pos]) : 1;
+                    if (!encoded_allowed.at(source_offset++)) {
+                        for (size_t j = 0; j < n; ++j) forbidden.insert(word.data() + pos + j);
+                    }
+                    pos += n;
+                }
+            }
             work_queue = llm_bigram_bpe::queue();
             symbols.clear();
 
@@ -631,12 +691,12 @@ struct llm_tokenizer_bpe_session {
             size_t offset = 0;
 
             //if (vocab.tokenizer_ignore_merges && vocab.token_to_id.find(word) != vocab.token_to_id.end()) {
-            if (vocab.get_ignore_merges() && vocab.text_to_token(word) != LLAMA_TOKEN_NULL) {
+            if (vocab.get_ignore_merges() && lookup(word.data(), word.size()) != LLAMA_TOKEN_NULL) {
                 symbols.emplace_back(llm_symbol{-1, -1, word.c_str(), word.size()});
                 offset = word.size();
             } else if (tok_pre == LLAMA_VOCAB_PRE_TYPE_GEMMA4 && word.find_first_not_of('\n') == std::string::npos) {
                 // fix for gemma 4, ref: https://github.com/ggml-org/llama.cpp/pull/21343
-                auto tok = vocab.text_to_token(word);
+                auto tok = lookup(word.data(), word.size());
                 if (tok != LLAMA_TOKEN_NULL) {
                     symbols.emplace_back(llm_symbol{-1, -1, word.c_str(), word.size()});
                     offset = word.size();
@@ -712,7 +772,7 @@ struct llm_tokenizer_bpe_session {
                 }
 
                 const std::string str = std::string(symbol.text, symbol.n);
-                const auto token = vocab.text_to_token(str);
+                const auto token = lookup(symbol.text, symbol.n);
 
                 if (token == LLAMA_TOKEN_NULL) {
                     for (auto j = str.begin(); j != str.end(); ++j) {
@@ -728,6 +788,9 @@ struct llm_tokenizer_bpe_session {
                             token_multibyte = vocab.text_to_token(buf);
                         }
                         if (token_multibyte != LLAMA_TOKEN_NULL) {
+                            if (token_requires_trust(vocab, token_multibyte) && forbidden.count(symbol.text + (j - str.begin()))) {
+                                throw std::runtime_error("input byte has no ordinary token");
+                            }
                             output.push_back(token_multibyte);
                         }
                     }
@@ -739,6 +802,15 @@ struct llm_tokenizer_bpe_session {
     }
 
 private:
+    std::unordered_set<const char *> forbidden;
+    llama_token lookup(const char * text, size_t len) const {
+        const auto id = vocab.text_to_token(std::string(text, len));
+        if (token_requires_trust(vocab, id)) {
+            for (size_t i = 0; i < len; ++i) if (forbidden.count(text + i)) return LLAMA_TOKEN_NULL;
+        }
+        return id;
+    }
+
     void add_new_bigram(int left, int right) {
         if (left == -1 || right == -1) {
             return;
@@ -754,6 +826,8 @@ private:
             return;
         }
 
+        const auto id = vocab.text_to_token(left_token + right_token);
+        if (token_requires_trust(vocab, id) && lookup(symbols[left].text, symbols[left].n + symbols[right].n) == LLAMA_TOKEN_NULL) return;
         llm_bigram_bpe bigram;
 
         bigram.left  = left;
@@ -784,13 +858,17 @@ struct llm_tokenizer_wpm : llm_tokenizer {
 struct llm_tokenizer_wpm_session {
     llm_tokenizer_wpm_session(const llama_vocab & vocab) : vocab(vocab) {}
 
+    std::vector<uint8_t> allowed;
+
     void tokenize(const std::string & text, std::vector<llama_token> & output) {
         // normalize and split by whitespace
-        std::vector<std::string> words = preprocess(text, vocab.get_normalizer_opts());
+        std::vector<std::vector<uint8_t>> word_allowed;
+        std::vector<std::string> words = preprocess(text, vocab.get_normalizer_opts(), allowed, word_allowed);
         // bos token prepended already
 
         // find the longest tokens that form the words
-        for (const std::string & word : words) {
+        for (size_t w = 0; w < words.size(); ++w) {
+            const auto & word = words[w];
             // skip empty words
             if (word.size() == 0) {
                 continue;
@@ -798,6 +876,8 @@ struct llm_tokenizer_wpm_session {
 
             // prepend phantom space
             const std::string word1 = "\xe2\x96\x81" + word;
+            auto permissions = word_allowed[w];
+            if (!allowed.empty()) permissions.insert(permissions.begin(), 3, true);
             const int n = word1.size();
 
             const size_t current_tokens = output.size();
@@ -809,7 +889,7 @@ struct llm_tokenizer_wpm_session {
                 bool match = false;
                 for (int j = std::min(n, i + vocab.max_token_len() + 1); j > i; j--) {
                     auto id = vocab.text_to_token(word1.substr(i, j - i));
-                    if (id != LLAMA_TOKEN_NULL) {
+                    if (id != LLAMA_TOKEN_NULL && (!token_requires_trust(vocab, id) || bytes_allow_special(permissions, i, j))) {
                         output.push_back(id);
                         match = true;
                         i = j - 1;
@@ -831,19 +911,34 @@ struct llm_tokenizer_wpm_session {
     }
 
     // TODO: reduce string copies by using cpts_offs array
-    static std::vector<std::string> preprocess(const std::string & text, const llama_vocab::normalizer_options & normalizer_opts)  {
+    static std::vector<std::string> preprocess(const std::string & text, const llama_vocab::normalizer_options & normalizer_opts, const std::vector<uint8_t> & allowed, std::vector<std::vector<uint8_t>> & word_allowed) {
         std::vector<uint32_t> cpts = unicode_cpts_from_utf8(text);
         if (normalizer_opts.strip_accents) {
             cpts = unicode_cpts_normalize_nfd(cpts);
         }
+        std::vector<uint8_t> cpt_allowed;
+        for (size_t pos = 0; pos < text.size();) {
+            const size_t begin = pos;
+            try {
+                unicode_cpt_from_utf8(text, pos);
+                cpt_allowed.push_back(bytes_allow_special(allowed, begin, pos));
+            } catch (const std::invalid_argument &) {
+                ++pos;
+                cpt_allowed.push_back(bytes_allow_special(allowed, begin, pos));
+            }
+        }
         std::vector<std::string> words(1, "");
+        word_allowed.emplace_back();
+        size_t cpt_index = 0;
 
         for (const uint32_t cpt : cpts) {
+            const bool trusted = cpt_allowed.at(cpt_index++);
             const auto flags = unicode_cpt_flags_from_cpt(cpt);
 
             if (flags.is_whitespace) {
                 if (words.back().size()) {  // finish previous word if any
                     words.emplace_back();
+                    word_allowed.emplace_back();
                 }
                 continue;
             }
@@ -861,16 +956,21 @@ struct llm_tokenizer_wpm_session {
             if (flags.is_punctuation || ( cpt < 0x7F && flags.is_symbol ) || is_chinese_char(cpt)) {
                 if (words.back().size()) {  // finish previous word if any
                     words.emplace_back();
+                    word_allowed.emplace_back();
                 }
+                if (!allowed.empty()) word_allowed.back().assign(s.size(), trusted);
                 words.back() = s;       // single char word
                 words.emplace_back();   // start a new word
+                word_allowed.emplace_back();
             } else {
+                if (!allowed.empty()) word_allowed.back().insert(word_allowed.back().end(), s.size(), trusted);
                 words.back() += s;  // append char to word
             }
         }
 
         if (!words.back().size()) {
             words.pop_back();
+            word_allowed.pop_back();
         }
 
         return words;
@@ -980,6 +1080,9 @@ struct llm_tokenizer_ugm_session {
      * After processing the whole sequence we backtrack from the end to get
      * the best tokenization.
     */
+    std::vector<uint8_t> allowed;
+    std::vector<uint8_t> normalized_allowed;
+
     void tokenize(const std::string & text, std::vector<llama_token> & output) {
         // get current size of output (for reversal later)
         size_t output_size = output.size();
@@ -1009,7 +1112,7 @@ struct llm_tokenizer_ugm_session {
 
             while (prefix_offset <= input_len && node != NULL) {
                 // check if we found valid token in prefix
-                if (node->has_value) {
+                if (node->has_value && (!token_requires_trust(vocab, node->value) || bytes_allow_special(normalized_allowed, input_offset, prefix_offset))) {
                     // check if it corresponds to the whole UTF code point
                     if (prefix_offset - input_offset == n_utf8_code_units) {
                         single_codepoint_token_found = true;
@@ -1077,6 +1180,7 @@ private:
 
     void normalize(const std::string& input, std::string * normalized) {
         normalized->clear();
+        normalized_allowed.clear();
         normalized->reserve(input.size() * 3);
 
         const std::string space = vocab.get_escape_whitespaces() ? tokenizer.escaped_space : " ";
@@ -1087,11 +1191,13 @@ private:
 
         bool is_space_prepended = false;
         bool processing_non_ws = false;
+        bool pending_space_trusted = true;
 
         size_t input_len = input.size();
 
         for (size_t input_offset = 0; input_offset < input_len; ) {
             auto norm_res = normalize_prefix(input, input_offset);
+            const bool trusted = bytes_allow_special(allowed, input_offset, input_offset + norm_res.consumed_input);
             for (size_t i = 0; i < norm_res.normalized_len; i++) {
                 char c = norm_res.normalized[i];
                 if (c != ' ') {
@@ -1099,16 +1205,21 @@ private:
                         processing_non_ws = true;
                         if ((shall_prepend_space && !is_space_prepended) || shall_merge_spaces) {
                             normalized->append(space);
+                            if (!allowed.empty()) normalized_allowed.insert(normalized_allowed.end(), space.size(), pending_space_trusted);
                             is_space_prepended = true;
                         }
                     }
+                    pending_space_trusted = true;
                     normalized->push_back(c);
+                    if (!allowed.empty()) normalized_allowed.push_back(trusted);
                 } else {
+                    pending_space_trusted = pending_space_trusted && trusted;
                     if (processing_non_ws) {
                         processing_non_ws = false;
                     }
                     if (!shall_merge_spaces) {
                         normalized->append(space);
+                        if (!allowed.empty()) normalized_allowed.insert(normalized_allowed.end(), space.size(), trusted);
                     }
                 }
             }
@@ -1118,6 +1229,7 @@ private:
 
         if (shall_append_space) {
             normalized->append(space);
+            if (!allowed.empty()) normalized_allowed.insert(normalized_allowed.end(), space.size(), true);
         }
     }
 
@@ -1176,7 +1288,7 @@ private:
         // if input prefix matches some user-defined token return this token as normalization result
         auto user_defined_token_match =
            tokenizer.user_defined_token_matcher.get_longest_prefix(&input[input_offset], input.size() - input_offset);
-        if (user_defined_token_match.second > 0) {
+        if (user_defined_token_match.second > 0 && bytes_allow_special(allowed, input_offset, input_offset + user_defined_token_match.second)) {
             return { &input[input_offset], user_defined_token_match.second, user_defined_token_match.second };
         }
 
@@ -1328,9 +1440,12 @@ struct llm_tokenizer_rwkv : llm_tokenizer {
 struct llm_tokenizer_rwkv_session {
     llm_tokenizer_rwkv_session(const llama_vocab & vocab, const llm_tokenizer_rwkv & tokenizer) : vocab(vocab), tokenizer(tokenizer) {}
 
+    std::vector<uint8_t> allowed;
+
     void tokenize(const std::string & text, std::vector<llama_token> & output) {
         uint32_t position = 0;
         while (position < text.size()) {
+            const size_t begin = position;
             const struct naive_trie * node = tokenizer.token_matcher.traverse(text[position]);
             if (node == NULL) {
                 // no matching token found, add unknown token
@@ -1343,7 +1458,7 @@ struct llm_tokenizer_rwkv_session {
             uint32_t token_id = 0;
             uint32_t token_length = 0;
             while (node != NULL) {
-                if (node->has_value) {
+                if (node->has_value && (!token_requires_trust(vocab, node->value) || bytes_allow_special(allowed, begin, position + 1))) {
                     token_id = node->value;
                     token_length = position + 1;
                 }
@@ -1354,8 +1469,8 @@ struct llm_tokenizer_rwkv_session {
             }
 
             // add the longest matching token
-            output.push_back(token_id);
-            position = token_length;
+            output.push_back(token_length ? token_id : vocab.token_unk());
+            position = token_length ? token_length : begin + 1;
         }
     }
 
@@ -1365,7 +1480,7 @@ private:
 };
 
 struct llm_tokenizer_plamo2 : llm_tokenizer {
-    llm_tokenizer_plamo2(const llama_vocab & vocab) {
+    llm_tokenizer_plamo2(const llama_vocab & vocab) : vocab(vocab) {
         build(vocab);
     }
 
@@ -1506,11 +1621,19 @@ struct llm_tokenizer_plamo2 : llm_tokenizer {
         }
     }
 
-    std::vector<llama_token> encode(const std::string & text) const {
+    std::vector<llama_token> encode(const std::string & text, const std::vector<uint8_t> & allowed) const {
         std::vector<uint32_t> unicode_data = unicode_cpts_from_utf8(text);
+        std::vector<uint8_t> cpt_allowed;
+        for (size_t pos = 0; pos < text.size();) {
+            const size_t begin = pos;
+            try { unicode_cpt_from_utf8(text, pos); }
+            catch (const std::invalid_argument &) { ++pos; }
+            cpt_allowed.push_back(bytes_allow_special(allowed, begin, pos));
+        }
         // Skip the first code point if it is a BOM (Byte Order Mark)
         if (!unicode_data.empty() && unicode_data[0] == 0xFEFF) {
             unicode_data.erase(unicode_data.begin());
+            cpt_allowed.erase(cpt_allowed.begin());
         }
 
         if (unicode_data.empty()) {
@@ -1548,6 +1671,8 @@ struct llm_tokenizer_plamo2 : llm_tokenizer {
                 int32_t score = table_[p][TABLE_SCORE];
                 if (score > INVALID_SCORE) {
                     int32_t piece_length = table_[p][TABLE_PIECE_LENGTH];
+                    const auto id = table_[p][TABLE_TOKEN_ID];
+                    if (id >= 0 && token_requires_trust(vocab, id) && !bytes_allow_special(cpt_allowed, i, i + piece_length)) continue;
                     int64_t s = scores[i + piece_length] - score;
 
                     if (s < scores[i]) {
@@ -1604,6 +1729,8 @@ struct llm_tokenizer_plamo2 : llm_tokenizer {
         return token_ids;
     }
 private:
+    const llama_vocab & vocab;
+
     // Constants for table structure
     static constexpr int32_t TABLE_PIECE_LENGTH = 0;
     static constexpr int32_t TABLE_TOKEN_ID     = 1;
@@ -1636,8 +1763,10 @@ private:
 struct llm_tokenizer_plamo2_session {
     llm_tokenizer_plamo2_session(const llm_tokenizer_plamo2 & tokenizer) : tokenizer(tokenizer) {}
 
+    std::vector<uint8_t> allowed;
+
     void tokenize(const std::string & text, std::vector<llama_token> & output) {
-        std::vector<llama_token> tokens = tokenizer.encode(text);
+        std::vector<llama_token> tokens = tokenizer.encode(text, allowed);
         output.insert(output.end(), tokens.begin(), tokens.end());
     }
 
@@ -1667,24 +1796,31 @@ struct llm_tokenizer_hybriddna_session : llm_tokenizer_bpe_session {
             return;
         }
 
+        const auto input_allowed = allowed;
+        auto add_plain = [&](size_t begin, size_t count) {
+            if (!input_allowed.empty()) allowed.assign(input_allowed.begin() + begin, input_allowed.begin() + begin + count);
+            llm_tokenizer_bpe_session::tokenize(text.substr(begin, count), output);
+        };
         const size_t k = 6;
         size_t pos = 0;
 
         while (pos < text.size()) {
-            const size_t start = text.find(open_tag, pos);
+            size_t start = text.find(open_tag, pos);
+            while (start != std::string::npos && !bytes_allow_special(input_allowed, start, start + open_tag.size())) start = text.find(open_tag, start + 1);
             if (start == std::string::npos) {
                 if (pos < text.size()) {
-                    llm_tokenizer_bpe_session::tokenize(text.substr(pos), output);
+                    add_plain(pos, text.size() - pos);
                 }
                 break;
             }
             if (start > pos) {
-                llm_tokenizer_bpe_session::tokenize(text.substr(pos, start - pos), output);
+                add_plain(pos, start - pos);
             }
             output.push_back(dna_begin_id);
 
             const size_t content_start = start + open_tag.size();
-            const size_t end           = text.find(close_tag, content_start);
+            size_t end = text.find(close_tag, content_start);
+            while (end != std::string::npos && !bytes_allow_special(input_allowed, end, end + close_tag.size())) end = text.find(close_tag, end + 1);
             const size_t content_end   = (end == std::string::npos) ? text.size() : end;
 
             emit_dna_kmers(text.substr(content_start, content_end - content_start), k, dna_oov_id, output);
@@ -1733,20 +1869,30 @@ struct llm_tokenizer_whitespace_session : llm_tokenizer_bpe_session {
     void tokenize(const std::string & text, std::vector<llama_token> & output) override {
         const bool lowercase = vocab.get_normalizer_opts().lowercase;
 
+        const auto input_allowed = allowed;
+        std::vector<uint8_t> segment_allowed;
         std::string segment;
         auto flush = [&]() {
             if (!segment.empty()) {
+                allowed = segment_allowed;
                 llm_tokenizer_bpe_session::tokenize(segment, output);
                 segment.clear();
+                segment_allowed.clear();
             }
         };
 
-        for (uint32_t cpt : unicode_cpts_from_utf8(text)) {
+        for (size_t pos = 0; pos < text.size();) {
+            const size_t begin = pos;
+            uint32_t cpt;
+            try { cpt = unicode_cpt_from_utf8(text, pos); }
+            catch (const std::invalid_argument &) { ++pos; cpt = 0xFFFD; }
             // drop whitespace
             if (unicode_cpt_flags_from_cpt(cpt).is_whitespace) {
                 flush();
             } else {
-                segment += unicode_cpt_to_utf8(lowercase ? unicode_tolower(cpt) : cpt);
+                const auto converted = unicode_cpt_to_utf8(lowercase ? unicode_tolower(cpt) : cpt);
+                segment += converted;
+                if (!input_allowed.empty()) segment_allowed.insert(segment_allowed.end(), converted.size(), bytes_allow_special(input_allowed, begin, pos));
             }
         }
         flush();
@@ -1887,7 +2033,7 @@ struct llama_vocab::impl {
 
     void init_tokenizer(enum llama_vocab_type type);
 
-    void tokenizer_st_partition(std::forward_list<fragment_buffer_variant> & buffer, bool parse_special) const;
+    void tokenizer_st_partition(std::forward_list<fragment_buffer_variant> & buffer, bool parse_special, const llama_tokenize_range * ranges, size_t n_ranges) const;
 
     std::string token_to_piece_for_cache(
                   llama_token   token,
@@ -1897,7 +2043,8 @@ struct llama_vocab::impl {
     std::vector<llama_token> tokenize(
             const std::string & raw_text,
                          bool   add_special,
-                         bool   parse_special = false) const;
+                         bool   parse_special = false,
+            const llama_tokenize_range * ranges = nullptr, size_t n_ranges = 0) const;
 
     int32_t tokenize(
                    const char * text,
@@ -3252,7 +3399,7 @@ void llama_vocab::impl::init_tokenizer(enum llama_vocab_type type) {
 
 // #define PRETOKENIZERDEBUG
 
-void llama_vocab::impl::tokenizer_st_partition(std::forward_list<fragment_buffer_variant> & buffer, bool parse_special) const {
+void llama_vocab::impl::tokenizer_st_partition(std::forward_list<fragment_buffer_variant> & buffer, bool parse_special, const llama_tokenize_range * ranges, size_t n_ranges) const {
     // for each special token
     for (const llama_token special_id : cache_special_tokens) {
         const auto & data = vocab.get_token_data(special_id);
@@ -3278,16 +3425,21 @@ void llama_vocab::impl::tokenizer_st_partition(std::forward_list<fragment_buffer
                 auto raw_text_base_offset = fragment.offset;
                 auto raw_text_base_length = fragment.length;
 
+                size_t search_offset = raw_text_base_offset;
                 // loop over the text
                 while (true) {
                     // find the first occurrence of a given special token in this fragment
                     //  passing offset argument only limit the "search area" but match coordinates
                     //  are still relative to the source full raw_text
                     //  string_view begins at pos 0 for the same reason
-                    auto match = std::string_view(raw_text.data(), raw_text_base_offset + raw_text_base_length).find(text, raw_text_base_offset);
+                    auto match = std::string_view(raw_text.data(), raw_text_base_offset + raw_text_base_length).find(text, search_offset);
 
                     // no occurrences found, stop processing this fragment for a given special token
                     if (match == std::string::npos) break;
+                    if (ranges && !bytes_allow_special(ranges, n_ranges, match, match + text.size())) {
+                        search_offset = match + 1;
+                        continue;
+                    }
 
 #ifdef PRETOKENIZERDEBUG
                     LLAMA_LOG_WARN("FF: (%ld %ld %ld) '%s'\n", raw_text->length(), raw_text_base_offset, raw_text_base_length, raw_text->substr(raw_text_base_offset, raw_text_base_length).c_str());
@@ -3351,6 +3503,7 @@ void llama_vocab::impl::tokenizer_st_partition(std::forward_list<fragment_buffer
                         // repeat for the right side
                         raw_text_base_offset = right_reminder_offset;
                         raw_text_base_length = right_reminder_length;
+                        search_offset = raw_text_base_offset;
 
 #ifdef PRETOKENIZERDEBUG
                         LLAMA_LOG_WARN("RR: (%ld %ld) '%s'\n", raw_text_base_offset, raw_text_base_length, raw_text->substr(raw_text_base_offset, raw_text_base_length).c_str());
@@ -3418,7 +3571,8 @@ static std::string llama_decode_text(const std::string & text) {
 std::vector<llama_token> llama_vocab::impl::tokenize(
         const std::string & raw_text,
         bool add_special,
-        bool parse_special) const {
+        bool parse_special,
+        const llama_tokenize_range * ranges, size_t n_ranges) const {
     GGML_ASSERT(tokenizer && "Tokenizer not initialized. Call llama_vocab::init_tokenizer() first.");
 
     std::vector<llama_token> output;
@@ -3426,8 +3580,21 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
 
     if (!raw_text.empty()) {
         fragment_buffer.emplace_front(raw_text, 0, raw_text.length());
-        tokenizer_st_partition(fragment_buffer, parse_special);
+        tokenizer_st_partition(fragment_buffer, parse_special, ranges, n_ranges);
     }
+
+    auto fragment_allowed = [&](const fragment_buffer_variant & fragment, bool escape, bool prefix = false) {
+        std::vector<uint8_t> allowed;
+        if (!ranges) return allowed;
+        if (prefix) allowed.insert(allowed.end(), escape ? 3 : 1, true);
+        size_t range = 0;
+        for (size_t i = fragment.offset; i < size_t(fragment.offset + fragment.length); ++i) {
+            while (range < n_ranges && ranges[range].end <= i) ++range;
+            const bool trusted = ranges[range].allow_special;
+            allowed.insert(allowed.end(), escape && fragment.raw_text[i] == ' ' ? 3 : 1, trusted);
+        }
+        return allowed;
+    };
 
     switch (get_type()) {
         case LLAMA_VOCAB_TYPE_SPM:
@@ -3461,6 +3628,7 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
 #endif
                         llama_escape_whitespace(text);
                         llm_tokenizer_spm_session session(vocab);
+                        session.allowed = fragment_allowed(fragment, true, add_space_prefix && is_prev_special);
                         session.tokenize(text, output);
                         is_prev_special = false;
                     } else { // if (fragment.type == FRAGMENT_BUFFER_VARIANT_TYPE_TOKEN)
@@ -3510,6 +3678,7 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
 #ifdef PRETOKENIZERDEBUG
                         LLAMA_LOG_WARN("TT: (%ld %ld %ld) '%s'\n", text.length(), fragment.offset, fragment.length, text.c_str());
 #endif
+                        session->allowed = fragment_allowed(fragment, escape_whitespaces);
                         session->tokenize(text, output);
                     } else { // if (fragment.type == FRAGMENT_BUFFER_VARIANT_TYPE_TOKEN)
                         session->append(fragment.token, output);
@@ -3537,6 +3706,8 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
 #ifdef PRETOKENIZERDEBUG
                         LLAMA_LOG_WARN("TT: (%ld %ld %ld) '%s'\n", text.length(), fragment.offset, fragment.length, text.c_str());
 #endif
+                        session.allowed = fragment_allowed(fragment, false);
+                        session.allowed = fragment_allowed(fragment, false);
                         session.tokenize(text, output);
                     } else { // if (fragment.type == FRAGMENT_BUFFER_VARIANT_TYPE_TOKEN)
                         output.push_back(fragment.token);
@@ -3591,6 +3762,7 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
                         LLAMA_LOG_WARN("TT: (%ld %ld %ld) '%s'\n", text.length(), fragment.offset, fragment.length, text.c_str());
 #endif
 
+                        session.allowed = fragment_allowed(fragment, false);
                         session.tokenize(text, output);
                     } else { // if (fragment.type == FRAGMENT_BUFFER_VARIANT_TYPE_TOKEN)
                         output.push_back(fragment.token);
@@ -3608,6 +3780,7 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
                         LLAMA_LOG_WARN("TT: (%ld %ld %ld) '%s'\n", text.length(), fragment.offset, fragment.length, text.c_str());
 #endif
 
+                        session.allowed = fragment_allowed(fragment, false);
                         session.tokenize(text, output);
                     } else { // if (fragment.type == FRAGMENT_BUFFER_VARIANT_TYPE_TOKEN)
                         output.push_back(fragment.token);
@@ -4241,6 +4414,22 @@ std::vector<llama_token> llama_vocab::tokenize(
     return pimpl->tokenize(raw_text, add_special, parse_special);
 }
 
+std::vector<llama_token> llama_vocab::tokenize_with_ranges(
+        const std::string & text, bool add_special,
+        const llama_tokenize_range * ranges, size_t n_ranges) const {
+    if (n_ranges && !ranges) throw std::invalid_argument("missing tokenizer ranges");
+    size_t end = 0;
+    for (size_t i = 0; i < n_ranges; ++i) {
+        if (ranges[i].begin != end || ranges[i].end <= end || ranges[i].end > text.size()) {
+            throw std::invalid_argument("invalid tokenizer ranges");
+        }
+        end = ranges[i].end;
+    }
+    if (end != text.size()) throw std::invalid_argument("incomplete tokenizer ranges");
+    const llama_tokenize_range empty = {0, 0, false};
+    return pimpl->tokenize(text, add_special, true, ranges ? ranges : &empty, n_ranges);
+}
+
 const std::string & llama_vocab::token_to_piece(llama_token token) const {
     return pimpl->token_to_piece(token);
 }
@@ -4507,6 +4696,25 @@ int32_t llama_tokenize(
                         bool   add_special,
                         bool   parse_special) {
     return vocab->tokenize(text, text_len, tokens, n_tokens_max, add_special, parse_special);
+}
+
+int32_t llama_tokenize_with_ranges(
+        const llama_vocab * vocab, const char * text, int32_t text_len,
+        llama_token * tokens, int32_t n_tokens_max, bool add_special,
+        const llama_tokenize_range * ranges, size_t n_ranges) {
+    if (!vocab || text_len < 0 || n_tokens_max < 0 || (!text && text_len) || (!tokens && n_tokens_max)) {
+        return INT32_MIN;
+    }
+    try {
+        auto result = vocab->tokenize_with_ranges(std::string(text ? text : "", text_len), add_special, ranges, n_ranges);
+        if (result.size() >= size_t(INT32_MAX)) return INT32_MIN;
+        if (result.size() > size_t(n_tokens_max)) return -int32_t(result.size());
+        std::copy(result.begin(), result.end(), tokens);
+        return int32_t(result.size());
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
+        return INT32_MIN;
+    }
 }
 
 int32_t llama_token_to_piece(

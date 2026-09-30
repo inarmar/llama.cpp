@@ -172,9 +172,9 @@ static void append_codepoint_as_ascii_json_escape(std::string & out, uint32_t co
     append_u16(0xDC00 + (codepoint & 0x3FF));
 }
 
-static std::string json_ensure_ascii_preserving_format(const std::string & json_str) {
-    std::string output;
-    output.reserve(json_str.size());
+static string json_ensure_ascii_preserving_format(const string & source) {
+    const auto json_str = source.str();
+    string output;
 
     bool in_string = false;
     bool escaped = false;
@@ -182,7 +182,7 @@ static std::string json_ensure_ascii_preserving_format(const std::string & json_
     for (size_t pos = 0; pos < json_str.size();) {
         const char ch = json_str[pos];
         if (!in_string) {
-            output.push_back(ch);
+            output.append(source.substr(pos, 1));
             if (ch == '"') {
                 in_string = true;
             }
@@ -191,21 +191,21 @@ static std::string json_ensure_ascii_preserving_format(const std::string & json_
         }
 
         if (escaped) {
-            output.push_back(ch);
+            output.append(source.substr(pos, 1));
             escaped = false;
             ++pos;
             continue;
         }
 
         if (ch == '\\') {
-            output.push_back(ch);
+            output.append(source.substr(pos, 1));
             escaped = true;
             ++pos;
             continue;
         }
 
         if (ch == '"') {
-            output.push_back(ch);
+            output.append(source.substr(pos, 1));
             in_string = false;
             ++pos;
             continue;
@@ -213,19 +213,21 @@ static std::string json_ensure_ascii_preserving_format(const std::string & json_
 
         const unsigned char uch = static_cast<unsigned char>(ch);
         if (uch < 0x80) {
-            output.push_back(ch);
+            output.append(source.substr(pos, 1));
             ++pos;
             continue;
         }
 
         auto parsed = common_parse_utf8_codepoint(json_str, pos);
         if (parsed.status != utf8_parse_result::SUCCESS) {
-            output += "\\ufffd";
+            output.append(string("\\ufffd", source.has_input(pos, 1)));
             ++pos;
             continue;
         }
 
-        append_codepoint_as_ascii_json_escape(output, parsed.codepoint);
+        std::string escape;
+        append_codepoint_as_ascii_json_escape(escape, parsed.codepoint);
+        output.append(string(escape, source.has_input(pos, parsed.bytes_consumed)));
         pos += parsed.bytes_consumed;
     }
 
@@ -252,9 +254,9 @@ static value tojson(const func_args & args) {
     }
     const bool ensure_ascii = val_ascii->as_bool(); // undefined == false
     auto separators = (is_val<value_array>(val_separators) ? val_separators : mk_val<value_array>())->as_array();
-    std::string item_sep = separators.size() > 0 ? separators[0]->as_string().str() : (indent < 0 ? ", " : ",");
-    std::string key_sep = separators.size() > 1 ? separators[1]->as_string().str() : ": ";
-    std::string json_str = value_to_json(args.get_pos(0), indent, item_sep, key_sep);
+    string item_sep = separators.size() > 0 ? separators[0]->as_string() : string(indent < 0 ? ", " : ",");
+    string key_sep = separators.size() > 1 ? separators[1]->as_string() : string(": ");
+    string json_str = value_to_json_string(args.get_pos(0), indent, item_sep, key_sep);
     if (ensure_ascii) {
         json_str = json_ensure_ascii_preserving_format(json_str);
     }
@@ -396,15 +398,26 @@ const func_builtins & global_builtins() {
         {"namespace", toobject},
         {"strftime_now", [](const func_args & args) -> value {
             args.ensure_vals<value_string>();
-            std::string format = args.get_pos(0)->as_string().str();
-            // get current time
-            // TODO: make sure this is the same behavior as Python's strftime
+            const auto source = args.get_pos(0)->as_string();
+            const auto format = source.str();
             char buf[100];
-            if (std::strftime(buf, sizeof(buf), format.c_str(), std::localtime(&args.ctx.current_time))) {
-                return mk_val<value_string>(std::string(buf));
-            } else {
-                throw raised_exception("strftime_now: failed to format time");
+            if (!std::strftime(buf, sizeof(buf), format.c_str(), std::localtime(&args.ctx.current_time))) return mk_val<value_string>("");
+            string result;
+            for (size_t i = 0; i < format.size();) {
+                if (format[i] != '%') {
+                    result.append(source.substr(i++, 1));
+                    continue;
+                }
+                const size_t begin = i++;
+                while (i < format.size() && (format[i] == 'E' || format[i] == 'O' || format[i] == '-' || format[i] == '_' || format[i] == '0' || format[i] == '#' || format[i] == '^' || format[i] == ':' || format[i] == '+' || std::isdigit(static_cast<unsigned char>(format[i])))) ++i;
+                if (i < format.size()) ++i;
+                char piece[100];
+                const auto spec = format.substr(begin, i - begin);
+                if (!std::strftime(piece, sizeof(piece), spec.c_str(), std::localtime(&args.ctx.current_time))) return mk_val<value_string>("");
+                result.append(string(piece, source.has_input(begin, i - begin)));
             }
+            if (result.str() != buf) throw raised_exception("strftime provenance mismatch");
+            return mk_val<value_string>(result);
         }},
         {"range", [](const func_args & args) -> value {
             args.ensure_count(1, 3);
@@ -713,89 +726,63 @@ const func_builtins & value_string_t::get_builtins() const {
         }},
         {"split", [](const func_args & args) -> value {
             args.ensure_count(1, 3);
-            value val_input = args.get_pos(0);
-            if (!is_val<value_string>(val_input)) {
-                throw raised_exception("split() first argument must be a string");
-            }
-            std::string str = val_input->as_string().str();
-            // FIXME: Support non-specified delimiter (split on consecutive (no leading or trailing) whitespace)
-            std::string delim = (args.count() > 1) ? args.get_pos(1)->as_string().str() : " ";
-            if (delim.empty()) {
-                throw raised_exception("empty separator");
-            }
-            int64_t maxsplit = (args.count() > 2) ? args.get_pos(2)->as_int() : -1;
+            args.ensure_vals<value_string>();
+            const auto input = args.get_pos(0)->as_string();
+            const auto text = input.str();
+            const auto delim = args.count() > 1 ? args.get_pos(1)->as_string().str() : " ";
+            if (delim.empty()) throw raised_exception("empty separator");
+            int64_t maxsplit = args.count() > 2 ? args.get_pos(2)->as_int() : -1;
             auto result = mk_val<value_array>();
-            size_t pos = 0;
-            std::string token;
-            while ((pos = str.find(delim)) != std::string::npos && maxsplit != 0) {
-                token = str.substr(0, pos);
-                result->push_back(mk_val<value_string>(token));
-                str.erase(0, pos + delim.length());
+            size_t start = 0, pos;
+            while (maxsplit != 0 && (pos = text.find(delim, start)) != std::string::npos) {
+                result->push_back(mk_val<value_string>(input.substr(start, pos - start)));
+                start = pos + delim.size();
                 --maxsplit;
             }
-            auto res = mk_val<value_string>(str);
-            res->val_str.mark_input_based_on(args.get_pos(0)->val_str);
-            result->push_back(std::move(res));
+            result->push_back(mk_val<value_string>(input.substr(start)));
             return result;
         }},
         {"rsplit", [](const func_args & args) -> value {
             args.ensure_count(1, 3);
-            value val_input = args.get_pos(0);
-            if (!is_val<value_string>(val_input)) {
-                throw raised_exception("rsplit() first argument must be a string");
-            }
-            std::string str = val_input->as_string().str();
-            // FIXME: Support non-specified delimiter (split on consecutive (no leading or trailing) whitespace)
-            std::string delim = (args.count() > 1) ? args.get_pos(1)->as_string().str() : " ";
-            if (delim.empty()) {
-                throw raised_exception("empty separator");
-            }
-            int64_t maxsplit = (args.count() > 2) ? args.get_pos(2)->as_int() : -1;
+            args.ensure_vals<value_string>();
+            const auto input = args.get_pos(0)->as_string();
+            auto text = input.str();
+            const auto delim = args.count() > 1 ? args.get_pos(1)->as_string().str() : " ";
+            if (delim.empty()) throw raised_exception("empty separator");
+            int64_t maxsplit = args.count() > 2 ? args.get_pos(2)->as_int() : -1;
             auto result = mk_val<value_array>();
-            size_t pos = 0;
-            std::string token;
-            while ((pos = str.rfind(delim)) != std::string::npos && maxsplit != 0) {
-                token = str.substr(pos + delim.length());
-                result->push_back(mk_val<value_string>(token));
-                str.erase(pos);
+            size_t pos;
+            while (maxsplit != 0 && (pos = text.rfind(delim)) != std::string::npos) {
+                result->push_back(mk_val<value_string>(input.substr(pos + delim.size(), text.size() - pos - delim.size())));
+                text.resize(pos);
                 --maxsplit;
             }
-            auto res = mk_val<value_string>(str);
-            res->val_str.mark_input_based_on(args.get_pos(0)->val_str);
-            result->push_back(std::move(res));
+            result->push_back(mk_val<value_string>(input.substr(0, text.size())));
             result->reverse();
             return result;
         }},
         {"replace", [](const func_args & args) -> value {
             args.ensure_vals<value_string, value_string, value_string, value_int>(true, true, true, false);
-            std::string str = args.get_pos(0)->as_string().str();
-            std::string old_str = args.get_pos(1)->as_string().str();
-            std::string new_str = args.get_pos(2)->as_string().str();
-            int64_t count = args.count() > 3 ? args.get_pos(3)->as_int() : -1;
-            if (count > 0) {
+            const auto input = args.get_pos(0)->as_string();
+            const auto text = input.str();
+            const auto needle = args.get_pos(1)->as_string().str();
+            const auto replacement = args.get_pos(2)->as_string();
+            if (args.count() > 3 && args.get_pos(3)->as_int() > 0) {
                 throw not_implemented_exception("String replace with count argument not implemented");
             }
-            if (old_str != new_str) {
-                size_t pos = 0;
-                if (old_str.empty()) {
-                    std::string new_res;
-                    new_res.reserve(str.length() + new_str.length() * (str.length() + 1));
-                    new_res += new_str;
-                    for (const char c : str) {
-                        new_res.push_back(c);
-                        new_res += new_str;
-                    }
-                    str = new_res;
-                } else {
-                    while ((pos = str.find(old_str, pos)) != std::string::npos) {
-                        str.replace(pos, old_str.length(), new_str);
-                        pos += new_str.length();
-                    }
+            string result;
+            if (needle.empty()) {
+                result.append(replacement);
+                for (size_t i = 0; i < text.size(); ++i) result.append(input.substr(i, 1)).append(replacement);
+            } else {
+                size_t start = 0, pos;
+                while ((pos = text.find(needle, start)) != std::string::npos) {
+                    result.append(input.substr(start, pos - start)).append(replacement);
+                    start = pos + needle.size();
                 }
+                result.append(input.substr(start));
             }
-            auto res = mk_val<value_string>(str);
-            res->val_str.mark_input_based_on(args.get_pos(0)->val_str);
-            return res;
+            return mk_val<value_string>(result);
         }},
         {"format", [](const func_args & args) -> value {
             value val_input = args.get_pos(0);
@@ -803,33 +790,18 @@ const func_builtins & value_string_t::get_builtins() const {
                 throw raised_exception("format() first argument must be a string");
             }
             const jinja::string & fmt = val_input->as_string();
-            const bool fmt_is_input = fmt.all_parts_are_input();
-
             const std::string str = fmt.str();
             jinja::string result;
-            std::string literal;
-            auto flush_literal = [&]() {
-                if (!literal.empty()) {
-                    result.parts.push_back({fmt_is_input, literal});
-                    literal.clear();
-                }
-            };
-
-            size_t arg_idx = 1; // positional args follow the format string
+            size_t start = 0, arg_idx = 1;
             for (size_t i = 0; i < str.size(); ++i) {
-                if (str[i] != '{') {
-                    literal += str[i];
-                    continue;
-                }
+                if (str[i] != '{') continue;
                 if (i + 1 >= str.size() || str[i + 1] != '}') {
                     throw not_implemented_exception("format() only supports simple '{}' placeholders");
                 }
-                ++i;
-                flush_literal();
-                const jinja::string arg_str = args.get_pos(arg_idx++)->as_string();
-                result.parts.insert(result.parts.end(), arg_str.parts.begin(), arg_str.parts.end());
+                result.append(fmt.substr(start, i - start)).append(args.get_pos(arg_idx++)->as_string());
+                start = ++i + 1;
             }
-            flush_literal();
+            result.append(fmt.substr(start));
             return mk_val<value_string>(result);
         }},
         {"int", [](const func_args & args) -> value {
@@ -908,10 +880,7 @@ const func_builtins & value_string_t::get_builtins() const {
                 throw raised_exception("slice step cannot be zero");
             }
             auto input = args.get_pos(0);
-            auto sliced = slice(input->as_string().str(), start, stop, step);
-            auto res = mk_val<value_string>(sliced);
-            res->val_str.mark_input_based_on(input->as_string());
-            return res;
+            return mk_val<value_string>(slice(input->as_string(), start, stop, step));
         }},
         {"safe", [](const func_args & args) -> value {
             // no-op for now
@@ -928,37 +897,38 @@ const func_builtins & value_string_t::get_builtins() const {
             if (!is_val<value_string>(val_input)) {
                 throw raised_exception("indent() first argument must be a string");
             }
-            std::string indent;
+            string indent;
             if (is_val<value_int>(val_width)) {
-                indent.assign(val_width->as_int(), ' ');
+                indent = string(std::string(val_width->as_int(), ' '));
             } else if (is_val<value_string>(val_width)) {
-                indent = val_width->as_string().str();
+                indent = val_width->as_string();
             } else {
-                indent = "    ";
+                indent = string("    ");
             }
-            std::string indented;
+            string indented;
+            const auto source = val_input->as_string();
+            size_t offset = 0;
             std::string input = val_input->as_string().str();
             std::istringstream iss = std::istringstream(input);
             std::string line;
             while (std::getline(iss, line)) {
-                if (!indented.empty()) {
-                    indented.push_back('\n');
+                if (indented.length() > 0) {
+                    indented.append(source.substr(offset - 1, 1));
                 }
-                if ((indented.empty() ? first : (!line.empty() || blank))) {
-                    indented += indent;
+                if ((indented.length() == 0 ? first : (!line.empty() || blank))) {
+                    indented.append(indent);
                 }
-                indented += line;
+                indented.append(source.substr(offset, line.size()));
+                offset += line.size() + 1;
             }
             if (!input.empty() && input.back() == '\n') {
-                indented.push_back('\n');
+                indented.append(source.substr(input.size() - 1, 1));
                 if (blank) {
-                    indented += indent;
+                    indented.append(indent);
                 }
             }
 
-            auto res = mk_val<value_string>(indented);
-            res->val_str.mark_input_based_on(val_input->as_string());
-            return res;
+            return mk_val<value_string>(indented);
         }},
         {"join", string_join_not_implemented},
     };
@@ -1074,8 +1044,8 @@ const func_builtins & value_array_t::get_builtins() const {
                 throw raised_exception("join() attribute must be string or integer");
             }
             const int64_t attr_int = attr_is_int ? attribute->as_int() : 0;
-            const std::string delim = val_delim->is_undefined() ? "" : val_delim->as_string().str();
-            std::string result;
+            const string delim = val_delim->is_undefined() ? string() : val_delim->as_string();
+            string result;
             for (size_t i = 0; i < arr.size(); ++i) {
                 value val_arr = arr[i];
                 if (!attribute->is_undefined()) {
@@ -1088,9 +1058,9 @@ const func_builtins & value_array_t::get_builtins() const {
                 if (!is_val<value_string>(val_arr) && !is_val<value_int>(val_arr) && !is_val<value_float>(val_arr)) {
                     throw raised_exception("join() can only join arrays of strings or numerics");
                 }
-                result += val_arr->as_string().str();
+                result.append(val_arr->as_string());
                 if (i < arr.size() - 1) {
-                    result += delim;
+                    result.append(delim);
                 }
             }
             return mk_val<value_string>(result);
@@ -1426,7 +1396,7 @@ static value from_json(const common_json & j, bool mark_input) {
     } else if (j.is_object()) {
         auto obj = mk_val<value_object>();
         for (auto it = j.begin(); it != j.end(); ++it) {
-            obj->insert(it.key(), from_json(it.value(), mark_input));
+            obj->insert(mk_val<value_string>(string(it.key(), mark_input)), from_json(it.value(), mark_input));
         }
         return obj;
     } else {
@@ -1512,7 +1482,7 @@ void global_from_json(context & ctx, const common_json & json_obj, bool mark_inp
 
 // recursively convert value to JSON string
 // TODO: avoid circular references
-static void value_to_json_internal(std::ostringstream & oss, const value & val, int curr_lvl, int indent, const std::string_view item_sep, const std::string_view key_sep) {
+static void value_to_json_internal(string & oss, const value & val, int curr_lvl, int indent, const string & item_sep, const string & key_sep) {
     auto indent_str = [indent, curr_lvl]() -> std::string {
         return (indent > 0) ? std::string(curr_lvl * indent, ' ') : "";
     };
@@ -1521,96 +1491,103 @@ static void value_to_json_internal(std::ostringstream & oss, const value & val, 
     };
 
     if (is_val<value_none>(val) || val->is_undefined()) {
-        oss << "null";
+        oss.append(string("null"));
     } else if (is_val<value_bool>(val)) {
-        oss << (val->as_bool() ? "true" : "false");
+        oss.append(string((val->as_bool() ? "true" : "false")));
     } else if (is_val<value_int>(val)) {
-        oss << val->as_int();
+        oss.append(string(std::to_string(val->as_int())));
     } else if (is_val<value_float>(val)) {
-        oss << val->as_float();
+        std::ostringstream number;
+        number << val->as_float();
+        oss.append(string(number.str()));
     } else if (is_val<value_string>(val)) {
-        oss << "\"";
-        for (char c : val->as_string().str()) {
-            switch (c) {
-                case '"': oss << "\\\""; break;
-                case '\\': oss << "\\\\"; break;
-                case '\b': oss << "\\b"; break;
-                case '\f': oss << "\\f"; break;
-                case '\n': oss << "\\n"; break;
-                case '\r': oss << "\\r"; break;
-                case '\t': oss << "\\t"; break;
-                default:
-                    if (static_cast<unsigned char>(c) < 0x20) {
-                        char buf[7];
-                        snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                        oss << buf;
-                    } else {
-                        oss << c;
-                    }
+        oss.append(string("\""));
+        const auto input = val->as_string();
+        for (const auto & part : input.parts) {
+            for (const char c : part.val) {
+                string escaped;
+                switch (c) {
+                    case '"': escaped.append(string("\\\"")); break;
+                    case '\\': escaped.append(string("\\\\")); break;
+                    case '\b': escaped.append(string("\\b")); break;
+                    case '\f': escaped.append(string("\\f")); break;
+                    case '\n': escaped.append(string("\\n")); break;
+                    case '\r': escaped.append(string("\\r")); break;
+                    case '\t': escaped.append(string("\\t")); break;
+                    default:
+                        if (static_cast<unsigned char>(c) < 0x20) {
+                            char buf[7];
+                            snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+                            escaped.append(string(buf));
+                        } else {
+                            escaped.append(string(std::string(1, c)));
+                        }
+                }
+                if (part.is_input) escaped.mark_input();
+                oss.append(escaped);
             }
         }
-        oss << "\"";
+        oss.append(string("\""));
     } else if (is_val<value_array>(val)) {
         const auto & arr = val->as_array();
-        oss << "[";
+        oss.append(string("["));
         if (!arr.empty()) {
-            oss << newline();
+            oss.append(string(newline()));
             for (size_t i = 0; i < arr.size(); ++i) {
-                oss << indent_str() << (indent > 0 ? std::string(indent, ' ') : "");
+                oss.append(string(indent_str())).append(string(indent > 0 ? std::string(indent, ' ') : ""));
                 value_to_json_internal(oss, arr[i], curr_lvl + 1, indent, item_sep, key_sep);
                 if (i < arr.size() - 1) {
-                    oss << item_sep;
+                    oss.append(string(item_sep));
                 }
-                oss << newline();
+                oss.append(string(newline()));
             }
-            oss << indent_str();
+            oss.append(string(indent_str()));
         }
-        oss << "]";
+        oss.append(string("]"));
     } else if (is_val<value_object>(val)) {
         const auto & obj = val->as_ordered_object(); // IMPORTANT: need to keep exact order
-        oss << "{";
+        oss.append(string("{"));
         if (!obj.empty()) {
-            oss << newline();
+            oss.append(string(newline()));
             size_t i = 0;
             for (const auto & pair : obj) {
-                oss << indent_str() << (indent > 0 ? std::string(indent, ' ') : "");
-                value_to_json_internal(oss, mk_val<value_string>(pair.first->as_string().str()), curr_lvl + 1, indent, item_sep, key_sep);
-                oss << key_sep;
+                oss.append(string(indent_str())).append(string(indent > 0 ? std::string(indent, ' ') : ""));
+                value_to_json_internal(oss, mk_val<value_string>(pair.first->as_string()), curr_lvl + 1, indent, item_sep, key_sep);
+                oss.append(string(key_sep));
                 value_to_json_internal(oss, pair.second, curr_lvl + 1, indent, item_sep, key_sep);
                 if (i < obj.size() - 1) {
-                    oss << item_sep;
+                    oss.append(string(item_sep));
                 }
-                oss << newline();
+                oss.append(string(newline()));
                 ++i;
             }
-            oss << indent_str();
+            oss.append(string(indent_str()));
         }
-        oss << "}";
+        oss.append(string("}"));
     } else {
-        oss << "null";
+        oss.append(string("null"));
     }
+}
+
+string value_to_json_string(const value & val, int indent, const string & item_sep, const string & key_sep) {
+    string output;
+    value_to_json_internal(output, val, 0, indent, item_sep, key_sep);
+    return output;
 }
 
 std::string value_to_json(const value & val, int indent, const std::string_view item_sep, const std::string_view key_sep) {
-    std::ostringstream oss;
-    value_to_json_internal(oss, val, 0, indent, item_sep, key_sep);
-    JJ_DEBUG("value_to_json: result=%s", oss.str().c_str());
-    return oss.str();
+    return value_to_json_string(val, indent, string(std::string(item_sep)), string(std::string(key_sep))).str();
 }
 
-// TODO: avoid circular references
-std::string value_to_string_repr(const value & val) {
+string value_to_string_repr(const value & val) {
     if (is_val<value_string>(val)) {
-        const std::string val_str = val->as_string().str();
-
-        if (val_str.find('\'') != std::string::npos) {
-            return value_to_json(val);
-        } else {
-            return "'" + val_str + "'";
+        const auto input = val->as_string();
+        if (input.str().find('\'') != std::string::npos) {
+            return value_to_json_string(val);
         }
-    } else {
-        return val->as_repr();
+        return string("'").append(input).append(string("'"));
     }
+    return val->as_string();
 }
 
 // stats utility

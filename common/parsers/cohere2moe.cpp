@@ -37,7 +37,7 @@ common_chat_params common_chat_params_init_cohere2moe(const common_chat_template
     // Stable prefix of the generation prompt that precedes the (forced) <|START_THINKING|> marker.
     const std::string GEN_PREFIX = TURN_START + CHATBOT;
 
-    data.prompt             = common_chat_template_direct_apply_impl(tmpl, inputs);
+    data.prompt             = common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt, &data.prompt_parts);
     data.generation_prompt  = common_chat_template_generation_prompt_impl(tmpl, inputs);
     data.format             = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking  = true;
@@ -74,7 +74,12 @@ common_chat_params common_chat_params_init_cohere2moe(const common_chat_template
             data.generation_prompt += THINK_END + TEXT_START + msg.render_content();
         }
 
-        data.prompt += data.generation_prompt;
+        common_chat_params_append_prompt(data, GEN_PREFIX + THINK_START, false);
+        common_chat_params_append_prompt(data, msg.reasoning_content, true);
+        if (inputs.continue_final_message == COMMON_CHAT_CONTINUATION_CONTENT) {
+            common_chat_params_append_prompt(data, THINK_END + TEXT_START, false);
+            common_chat_params_append_prompt(data, msg.render_content(), true);
+        }
     }
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
